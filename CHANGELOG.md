@@ -23,6 +23,15 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
  - Time Reserves: deducted seconds are accumulated in a pool; admins can view reserves via CLI and interactive.
  - time_earner interactive: earning is a timed session that stakes the chosen amount, counts down, forfeits on early exit, and pays double on successful completion.
  - Docs: Added `summary.md` (project summary) and `LOGIC_DESIGN.md` (replication-focused logic design).
+- Added `bulk-create` CLI subcommand to create many accounts for simulations with options for `--count`, `--prefix`, `--start-index`, `--initial` (human‑readable), `--passcode`, and `--admin-frequency`.
+- Admin: Added statistics view in interactive menu and `admin --stats` to show totals and top accounts.
+- Admin: Time Reserves operations — transfer from reserves to a user (`admin --reserves-transfer-to/--reserves-transfer-amount`) and distribute reserves equally across active users (`admin --reserves-distribute [--reserves-distribute-amount]`). Interactive admin menu includes both actions.
+- Tools Dashboard: Users can view personal stats (energy, hunger, water) from the interactive menu.
+- Admin: Stats controls — set a single user's stats to 100% or all users' stats to 100% via CLI flags (`admin --set-stats-full <username>`, `admin --set-stats-full-all`) and interactive admin menu.
+- New app `time_store`:
+  - CLI to list items with qty and effective prices, buy items to restore stats (energy/hunger/water), and manage store as admin.
+  - Market index supported in range -50%..+300% (default 0%). Effective price = current_price * (1 + index%).
+  - Admin commands to set market index, upsert items (kind, qty, restore values, base price), set qty, and refresh volatile prices.
 
 ## [0.1.0] - 2025-11-10
 - Initial pre-release planning.
