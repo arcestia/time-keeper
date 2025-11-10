@@ -37,6 +37,7 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
     p_admin = sub.add_parser("admin", help="Admin actions (requires admin authentication)")
     p_admin.add_argument("--username", required=True, help="Admin username")
     p_admin.add_argument("--list", action="store_true", help="List all accounts")
+    p_admin.add_argument("--reserves", action="store_true", help="Show Time Reserves balance")
     p_admin.add_argument("--db", help="SQLite database file path")
 
     p_lead = sub.add_parser("leaderboard", help="Show top accounts by balance")
@@ -119,9 +120,13 @@ def cmd_login(db_path: Path, username: str) -> None:
     print(f"Login success. User: {username}, Balance: {human}, Status: {status}")
 
 
-def cmd_admin(db_path: Path, username: str, do_list: bool) -> None:
+def cmd_admin(db_path: Path, username: str, do_list: bool, show_reserves: bool = False) -> None:
     require_admin(db_path, username)
-    if do_list:
+    if show_reserves:
+        total = db.get_time_reserves(db_path)
+        human = formatting.format_duration(total, style="short")
+        print(f"Time Reserves: {human} ({total} seconds)")
+    elif do_list:
         print_admin_table(db_path)
     else:
         print("No admin action specified. Use --list.")
@@ -357,11 +362,12 @@ def interactive_menu(db_path: Path) -> None:
             if is_admin:
                 print(f"{Fore.YELLOW}2){Style.RESET_ALL} Transfer time")
                 print(f"{Fore.YELLOW}3){Style.RESET_ALL} Admin: list accounts")
-                print(f"{Fore.YELLOW}4){Style.RESET_ALL} Leaderboard")
-                print(f"{Fore.YELLOW}5){Style.RESET_ALL} Run worker (background)")
-                print(f"{Fore.YELLOW}6){Style.RESET_ALL} Init DB")
-                print(f"{Fore.YELLOW}7){Style.RESET_ALL} Change DB path")
-                print(f"{Fore.YELLOW}8){Style.RESET_ALL} Logout")
+                print(f"{Fore.YELLOW}4){Style.RESET_ALL} Show Time Reserves")
+                print(f"{Fore.YELLOW}5){Style.RESET_ALL} Leaderboard")
+                print(f"{Fore.YELLOW}6){Style.RESET_ALL} Run worker (background)")
+                print(f"{Fore.YELLOW}7){Style.RESET_ALL} Init DB")
+                print(f"{Fore.YELLOW}8){Style.RESET_ALL} Change DB path")
+                print(f"{Fore.YELLOW}9){Style.RESET_ALL} Logout")
                 print(f"{Fore.YELLOW}0){Style.RESET_ALL} Quit")
             else:
                 print(f"{Fore.YELLOW}2){Style.RESET_ALL} Transfer time")
@@ -400,25 +406,28 @@ def interactive_menu(db_path: Path) -> None:
                     print_admin_table(current_db)
                 except SystemExit as e:
                     print(Fore.RED + str(e))
-            elif (is_admin and choice == "4") or (not is_admin and choice == "3"):
+            elif (is_admin and choice == "4"):
+                total = db.get_time_reserves(current_db)
+                print(Fore.CYAN + Style.BRIGHT + f"Time Reserves: {formatting.format_duration(total, style='short')} ({total} seconds)")
+            elif (is_admin and choice == "5") or (not is_admin and choice == "3"):
                 limit = _input_int_with_default("Top N", 10)
                 try:
                     cmd_leaderboard(current_db, limit)
                 except SystemExit as e:
                     print(Fore.RED + str(e))
-            elif is_admin and choice == "5":
+            elif is_admin and choice == "6":
                 interval = _input_float_with_default("Interval seconds", 1.0)
                 pid_path, log_path = _default_pid_log(current_db)
                 start_worker_background(current_db, interval, pid_path, log_path)
-            elif is_admin and choice == "6":
+            elif is_admin and choice == "7":
                 try:
                     cmd_init_db(current_db)
                 except SystemExit as e:
                     print(Fore.RED + str(e))
-            elif is_admin and choice == "7":
+            elif is_admin and choice == "8":
                 new_db = _input_with_default("DB path", str(current_db))
                 current_db = Path(new_db)
-            elif (is_admin and choice == "8"):
+            elif (is_admin and choice == "9"):
                 current_user = None
                 print(Fore.YELLOW + "Logged out.")
             elif (not is_admin and choice == "2"):
@@ -458,7 +467,7 @@ def main(argv: Optional[list] = None) -> None:
     elif ns.cmd == "login":
         cmd_login(db_path, ns.username)
     elif ns.cmd == "admin":
-        cmd_admin(db_path, ns.username, ns.list)
+        cmd_admin(db_path, ns.username, ns.list, ns.reserves)
     elif ns.cmd == "leaderboard":
         cmd_leaderboard(db_path, ns.limit)
     elif ns.cmd == "run-worker":

@@ -23,6 +23,13 @@ CREATE TABLE IF NOT EXISTS users (
 
 CREATE INDEX IF NOT EXISTS idx_users_active ON users(active);
 CREATE INDEX IF NOT EXISTS idx_users_balance ON users(balance_seconds);
+
+CREATE TABLE IF NOT EXISTS time_reserves (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    total_seconds INTEGER NOT NULL DEFAULT 0
+);
+
+INSERT OR IGNORE INTO time_reserves (id, total_seconds) VALUES (1, 0);
 """
 
 
@@ -46,6 +53,17 @@ def init_db(db_path: Path) -> None:
     with connect(db_path) as conn:
         conn.executescript(SCHEMA_SQL)
         conn.commit()
+
+def _ensure_reserves(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS time_reserves (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            total_seconds INTEGER NOT NULL DEFAULT 0
+        );
+        INSERT OR IGNORE INTO time_reserves (id, total_seconds) VALUES (1, 0);
+        """
+    )
 
 
 def create_account(db_path: Path, username: str, passcode_hash: str, initial_seconds: int = DEFAULT_INITIAL_SECONDS, is_admin: bool = False) -> int:
@@ -83,10 +101,18 @@ def deduct_one_second_all_active(db_path: Path) -> Tuple[int, int]:
     """
     with connect(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
+        _ensure_reserves(conn)
         cur = conn.execute(
             "UPDATE users SET balance_seconds = balance_seconds - 1 WHERE active = 1 AND balance_seconds > 0"
         )
         updated = cur.rowcount if cur.rowcount is not None else 0
+        if updated > 0:
+            # accumulate into time_reserves atomically
+            conn.execute(
+                "INSERT INTO time_reserves(id, total_seconds) VALUES (1, ?)\n"
+                "ON CONFLICT(id) DO UPDATE SET total_seconds = total_seconds + excluded.total_seconds",
+                (int(updated),),
+            )
         set_deactivated_if_zero(conn)
         cur2 = conn.execute("SELECT changes()")
         deactivated = cur2.fetchone()[0]
@@ -107,6 +133,14 @@ def list_all_accounts(db_path: Path) -> List[Dict[str, Any]]:
             "SELECT username, balance_seconds, active, is_admin, created_at, deactivated_at FROM users ORDER BY username ASC"
         )
         return [dict(r) for r in cur.fetchall()]
+
+
+def get_time_reserves(db_path: Path) -> int:
+    with connect(db_path) as conn:
+        _ensure_reserves(conn)
+        cur = conn.execute("SELECT total_seconds FROM time_reserves WHERE id = 1")
+        row = cur.fetchone()
+        return int(row[0]) if row else 0
 
 
 def top_accounts(db_path: Path, limit: int = 10) -> List[Dict[str, Any]]:
