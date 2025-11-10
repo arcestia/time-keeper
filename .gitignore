@@ -1,0 +1,10 @@
+# Time Keeper artifacts
+# Worker background files
+*.worker.pid
+*.worker.log
+# Local SQLite database
+*.db
+# Python
+__pycache__/
+*.pyc
+.venv/
