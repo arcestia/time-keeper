@@ -71,6 +71,7 @@ def _ensure_store_catalog(conn: sqlite3.Connection) -> None:
         """
         CREATE TABLE IF NOT EXISTS time_store_catalog (
             item TEXT PRIMARY KEY,
+            name TEXT,
             kind TEXT NOT NULL CHECK(kind IN ('food','water')),
             qty INTEGER NOT NULL DEFAULT 0,
             restore_energy INTEGER NOT NULL DEFAULT 0,
@@ -79,6 +80,26 @@ def _ensure_store_catalog(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    # Migration: ensure name column exists
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(time_store_catalog)").fetchall()}
+    if "name" not in cols:
+        conn.execute("ALTER TABLE time_store_catalog ADD COLUMN name TEXT")
+    if "id" not in cols:
+        # Add column without UNIQUE constraint (SQLite cannot add UNIQUE via ALTER)
+        conn.execute("ALTER TABLE time_store_catalog ADD COLUMN id INTEGER")
+        # Create a unique index to enforce uniqueness when ids are assigned
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_time_store_catalog_id ON time_store_catalog(id)")
+        # Backfill ids for existing rows with NULL id
+        rows = conn.execute("SELECT item FROM time_store_catalog WHERE id IS NULL ORDER BY item ASC").fetchall()
+        if rows:
+            max_row = conn.execute("SELECT COALESCE(MAX(id), 0) FROM time_store_catalog").fetchone()
+            next_id = int(max_row[0]) if max_row and max_row[0] is not None else 0
+            for r in rows:
+                next_id += 1
+                conn.execute("UPDATE time_store_catalog SET id = ? WHERE item = ?", (next_id, r[0]))
+    else:
+        # Ensure the unique index exists even if column already present
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_time_store_catalog_id ON time_store_catalog(id)")
 
 def _ensure_store_config(conn: sqlite3.Connection) -> None:
     conn.execute(
@@ -89,7 +110,6 @@ def _ensure_store_config(conn: sqlite3.Connection) -> None:
         )
         """
     )
-    conn.execute("INSERT OR IGNORE INTO time_store_config(id, market_index_percent) VALUES (1, 0)")
 
 
 def _ensure_stats(conn: sqlite3.Connection) -> None:
@@ -458,28 +478,46 @@ def set_market_index_percent(db_path: Path, percent: int) -> None:
     if p > 300: p = 300
     with connect(db_path) as conn:
         _ensure_store_config(conn)
-        conn.execute("UPDATE time_store_config SET market_index_percent = ? WHERE id = 1", (p,))
+        conn.execute(
+            "INSERT INTO time_store_config(id, market_index_percent) VALUES (1, ?)\n"
+            "ON CONFLICT(id) DO UPDATE SET market_index_percent = excluded.market_index_percent",
+            (p,),
+        )
         conn.commit()
 
 
 def get_market_index_percent(db_path: Path) -> int:
     with connect(db_path) as conn:
-        _ensure_store_config(conn)
-        row = conn.execute("SELECT market_index_percent FROM time_store_config WHERE id = 1").fetchone()
-        return int(row[0]) if row else 0
+        # Avoid writes on read path; if table/row missing, treat as 0
+        try:
+            _ensure_store_config(conn)
+            row = conn.execute("SELECT market_index_percent FROM time_store_config WHERE id = 1").fetchone()
+            return int(row[0]) if row else 0
+        except Exception:
+            return 0
 
 
-def upsert_store_item(db_path: Path, item: str, kind: str, qty: int, restore_energy: int, restore_hunger: int, restore_water: int, base_price_seconds: int) -> None:
+def upsert_store_item(db_path: Path, item: str, kind: str, qty: int, restore_energy: int, restore_hunger: int, restore_water: int, base_price_seconds: int, name: Optional[str] = None) -> None:
     now = int(time.time())
     with connect(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         _ensure_store_catalog(conn)
         _ensure_store_prices(conn)
-        conn.execute(
-            "INSERT INTO time_store_catalog(item, kind, qty, restore_energy, restore_hunger, restore_water) VALUES(?,?,?,?,?,?)\n"
-            "ON CONFLICT(item) DO UPDATE SET kind=excluded.kind, qty=excluded.qty, restore_energy=excluded.restore_energy, restore_hunger=excluded.restore_hunger, restore_water=excluded.restore_water",
-            (item, kind, int(qty), int(restore_energy), int(restore_hunger), int(restore_water))
-        )
+        # Assign sequence-like id only on first insert
+        row = conn.execute("SELECT id FROM time_store_catalog WHERE item = ?", (item,)).fetchone()
+        next_id = None
+        if not row:
+            rid_row = conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM time_store_catalog").fetchone()
+            next_id = int(rid_row[0]) if rid_row else 1
+            conn.execute(
+                "INSERT INTO time_store_catalog(item, id, name, kind, qty, restore_energy, restore_hunger, restore_water) VALUES(?,?,?,?,?,?,?,?)",
+                (item, next_id, name, kind, int(qty), int(restore_energy), int(restore_hunger), int(restore_water))
+            )
+        else:
+            conn.execute(
+                "UPDATE time_store_catalog SET name=COALESCE(?, name), kind=?, qty=?, restore_energy=?, restore_hunger=?, restore_water=? WHERE item = ?",
+                (name, kind, int(qty), int(restore_energy), int(restore_hunger), int(restore_water), item)
+            )
         # seed or update price
         row = conn.execute("SELECT item FROM time_store_prices WHERE item = ?", (item,)).fetchone()
         base = int(base_price_seconds)
@@ -505,31 +543,61 @@ def list_store_items(db_path: Path) -> List[Dict[str, Any]]:
         _ensure_store_config(conn)
         p = get_market_index_percent(db_path)
         rows = conn.execute(
-            "SELECT c.item, c.kind, c.qty, c.restore_energy, c.restore_hunger, c.restore_water, p.base_price_seconds, p.current_price_seconds\n"
+            "SELECT c.item, c.name, c.kind, c.qty, c.restore_energy, c.restore_hunger, c.restore_water, p.base_price_seconds, p.current_price_seconds, c.id\n"
             "FROM time_store_catalog c JOIN time_store_prices p ON c.item = p.item ORDER BY c.item ASC"
         ).fetchall()
         out: List[Dict[str, Any]] = []
         for r in rows:
-            base = int(r[6]); curr = int(r[7]); idx = float(p)/100.0
+            base = int(r[7]); curr = int(r[8]); idx = float(p)/100.0
             effective = max(1, int(round(curr * (1.0 + idx))))
             out.append({
                 "item": str(r[0]),
-                "kind": str(r[1]),
-                "qty": int(r[2]),
-                "restore_energy": int(r[3]),
-                "restore_hunger": int(r[4]),
-                "restore_water": int(r[5]),
+                "name": (str(r[1]) if r[1] is not None else None),
+                "kind": str(r[2]),
+                "qty": int(r[3]),
+                "restore_energy": int(r[4]),
+                "restore_hunger": int(r[5]),
+                "restore_water": int(r[6]),
                 "base_price_seconds": base,
                 "current_price_seconds": curr,
                 "effective_price_seconds": effective,
                 "market_index_percent": int(p),
+                "id": int(r[9]) if r[9] is not None else None,
             })
         return out
 
 
-def purchase_store_item(db_path: Path, username: str, item: str, quantity: int) -> Dict[str, Any]:
-    """Atomically purchase quantity of item for username, applying stat restore and charging effective price with market index.
-    Returns: {success, message, balance, energy, hunger, water, qty_remaining}
+def get_next_store_item_id(db_path: Path) -> int:
+    with connect(db_path) as conn:
+        _ensure_store_catalog(conn)
+        row = conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM time_store_catalog").fetchone()
+        return int(row[0]) if row and row[0] is not None else 1
+
+
+def store_item_exists(db_path: Path, item: str) -> bool:
+    with connect(db_path) as conn:
+        _ensure_store_catalog(conn)
+        row = conn.execute("SELECT 1 FROM time_store_catalog WHERE item = ?", (item,)).fetchone()
+        return row is not None
+
+
+def _ensure_user_inventory(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_inventory (
+            user_id INTEGER NOT NULL,
+            item TEXT NOT NULL,
+            qty INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (user_id, item)
+        )
+        """
+    )
+
+
+def purchase_store_item(db_path: Path, username: str, item: str, quantity: int, apply_now: bool = True) -> Dict[str, Any]:
+    """Atomically purchase quantity of item for username.
+    If apply_now is True, immediately apply stat restore; otherwise store into user inventory.
+    Returns: {success, message, balance, energy, hunger, water, qty_remaining, stored}
     """
     q = int(max(1, quantity))
     result: Dict[str, Any] = {"success": False, "message": ""}
@@ -540,6 +608,7 @@ def purchase_store_item(db_path: Path, username: str, item: str, quantity: int) 
             _ensure_store_catalog(conn)
             _ensure_store_prices(conn)
             _ensure_store_config(conn)
+            _ensure_user_inventory(conn)
             # Load user
             u = conn.execute("SELECT id, active, balance_seconds, energy, hunger, water FROM users WHERE username = ?", (username,)).fetchone()
             if not u:
@@ -565,12 +634,22 @@ def purchase_store_item(db_path: Path, username: str, item: str, quantity: int) 
                 result["message"] = "Insufficient balance"; conn.rollback(); return result
             # Deduct balance
             conn.execute("UPDATE users SET balance_seconds = balance_seconds - ? WHERE id = ?", (total_cost, int(u["id"])) )
-            # Apply stats
-            def cap(v: int) -> int: return 0 if v < 0 else (100 if v > 100 else v)
-            new_energy = cap(int(u["energy"]) + int(r[1]) * q)
-            new_hunger = cap(int(u["hunger"]) + int(r[2]) * q)
-            new_water  = cap(int(u["water"])  + int(r[3]) * q)
-            conn.execute("UPDATE users SET energy = ?, hunger = ?, water = ? WHERE id = ?", (new_energy, new_hunger, new_water, int(u["id"])) )
+            stored = False
+            if apply_now:
+                # Apply stats
+                def cap(v: int) -> int: return 0 if v < 0 else (100 if v > 100 else v)
+                new_energy = cap(int(u["energy"]) + int(r[1]) * q)
+                new_hunger = cap(int(u["hunger"]) + int(r[2]) * q)
+                new_water  = cap(int(u["water"])  + int(r[3]) * q)
+                conn.execute("UPDATE users SET energy = ?, hunger = ?, water = ? WHERE id = ?", (new_energy, new_hunger, new_water, int(u["id"])) )
+            else:
+                # Store into inventory
+                stored = True
+                conn.execute(
+                    "INSERT INTO user_inventory(user_id, item, qty) VALUES(?,?,?)\n"
+                    "ON CONFLICT(user_id, item) DO UPDATE SET qty = qty + excluded.qty",
+                    (int(u["id"]), item, q)
+                )
             # Decrement stock
             conn.execute("UPDATE time_store_catalog SET qty = qty - ? WHERE item = ?", (q, item))
             # Read post state
@@ -587,11 +666,86 @@ def purchase_store_item(db_path: Path, username: str, item: str, quantity: int) 
                 "qty_remaining": int(rem[0]) if rem else 0,
                 "unit_price_seconds": int(effective),
                 "total_cost_seconds": int(total_cost),
+                "stored": stored,
             }
         except Exception as e:
             try: conn.rollback()
             except Exception: pass
             return {"success": False, "message": f"Purchase failed: {e}"}
+
+
+def purchase_store_item_by_id(db_path: Path, username: str, item_id: int, quantity: int, apply_now: bool = True) -> Dict[str, Any]:
+    # resolve id to item key then reuse implementation
+    with connect(db_path) as conn:
+        row = conn.execute("SELECT item FROM time_store_catalog WHERE id = ?", (int(item_id),)).fetchone()
+        if not row:
+            return {"success": False, "message": "Item not found"}
+        key = str(row[0])
+    return purchase_store_item(db_path, username, key, quantity, apply_now=apply_now)
+
+
+def list_user_inventory(db_path: Path, username: str) -> List[Dict[str, Any]]:
+    with connect(db_path) as conn:
+        _ensure_user_inventory(conn)
+        _ensure_store_catalog(conn)
+        u = conn.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()
+        if not u:
+            return []
+        rows = conn.execute(
+            "SELECT ui.item, ui.qty, c.name, c.kind, c.restore_energy, c.restore_hunger, c.restore_water, c.id\n"
+            "FROM user_inventory ui JOIN time_store_catalog c ON ui.item = c.item WHERE ui.user_id = ? ORDER BY c.item",
+            (int(u[0]),)
+        ).fetchall()
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            out.append({
+                "item": str(r[0]),
+                "qty": int(r[1]),
+                "name": (str(r[2]) if r[2] is not None else None),
+                "kind": str(r[3]),
+                "restore_energy": int(r[4]),
+                "restore_hunger": int(r[5]),
+                "restore_water": int(r[6]),
+                "id": int(r[7]) if r[7] is not None else None,
+            })
+        return out
+
+
+def use_inventory_item(db_path: Path, username: str, item: str, quantity: int) -> Dict[str, Any]:
+    q = int(max(1, quantity))
+    with connect(db_path) as conn:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            _ensure_stats(conn)
+            _ensure_user_inventory(conn)
+            _ensure_store_catalog(conn)
+            # Load user
+            u = conn.execute("SELECT id, energy, hunger, water FROM users WHERE username = ?", (username,)).fetchone()
+            if not u:
+                conn.rollback(); return {"success": False, "message": "User not found"}
+            # Check inventory
+            row = conn.execute("SELECT qty FROM user_inventory WHERE user_id = ? AND item = ?", (int(u[0]), item)).fetchone()
+            if not row or int(row[0]) < q:
+                conn.rollback(); return {"success": False, "message": "Not enough in inventory"}
+            # Get item effects
+            eff = conn.execute("SELECT restore_energy, restore_hunger, restore_water FROM time_store_catalog WHERE item = ?", (item,)).fetchone()
+            if not eff:
+                conn.rollback(); return {"success": False, "message": "Item not found"}
+            def cap(v: int) -> int: return 0 if v < 0 else (100 if v > 100 else v)
+            new_energy = cap(int(u[1]) + int(eff[0]) * q)
+            new_hunger = cap(int(u[2]) + int(eff[1]) * q)
+            new_water  = cap(int(u[3]) + int(eff[2]) * q)
+            conn.execute("UPDATE users SET energy = ?, hunger = ?, water = ? WHERE id = ?", (new_energy, new_hunger, new_water, int(u[0])))
+            conn.execute("UPDATE user_inventory SET qty = qty - ? WHERE user_id = ? AND item = ?", (q, int(u[0]), item))
+            # Clean zero rows
+            conn.execute("DELETE FROM user_inventory WHERE user_id = ? AND item = ? AND qty <= 0", (int(u[0]), item))
+            post = conn.execute("SELECT energy, hunger, water FROM users WHERE id = ?", (int(u[0]),)).fetchone()
+            conn.commit()
+            return {"success": True, "message": "Used item", "energy": int(post[0]), "hunger": int(post[1]), "water": int(post[2])}
+        except Exception as e:
+            try: conn.rollback()
+            except Exception: pass
+            return {"success": False, "message": f"Use failed: {e}"}
 
 
 def transfer_seconds(db_path: Path, from_username: str, to_username: str, amount_seconds: int) -> Dict[str, Any]:
