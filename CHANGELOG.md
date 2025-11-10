@@ -22,6 +22,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
  - New CLI app `time_earner`: users can login and earn time to their balance (interactive and non-interactive modes).
  - Time Reserves: deducted seconds are accumulated in a pool; admins can view reserves via CLI and interactive.
  - time_earner interactive: earning is a timed session that stakes the chosen amount, counts down, forfeits on early exit, and pays double on successful completion.
+ - Docs: Added `summary.md` (project summary) and `LOGIC_DESIGN.md` (replication-focused logic design).
 
 ## [0.1.0] - 2025-11-10
 - Initial pre-release planning.
