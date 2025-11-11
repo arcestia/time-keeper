@@ -121,6 +121,45 @@ def list_earner_stake_tiers(db_path: Path) -> List[Dict[str, Any]]:
             for r in rows
         ]
 
+def get_user_premium_progress(db_path: Path, username: str) -> Dict[str, Any]:
+    """Return user's premium progression info.
+    Output: {lifetime_seconds, current_tier, next_tier, current_min_seconds, next_min_seconds, to_next_seconds, percent_to_next}
+    If at max tier or lifetime, next_* will be None and percent_to_next=100.0
+    """
+    with connect(db_path) as conn:
+        _ensure_premium(conn)
+        _ensure_premium_tiers(conn)
+        u = conn.execute("SELECT premium_lifetime_seconds, premium_is_lifetime FROM users WHERE username = ?", (username,)).fetchone()
+        if not u:
+            return {"success": False, "message": "User not found"}
+        life = int(u[0] or 0)
+        is_life = bool(int(u[1] or 0))
+        rows = conn.execute("SELECT tier, min_seconds FROM premium_tiers ORDER BY tier ASC").fetchall()
+        if not rows:
+            return {"success": True, "lifetime_seconds": life, "current_tier": 0, "next_tier": None, "current_min_seconds": 0, "next_min_seconds": None, "to_next_seconds": None, "percent_to_next": 0.0, "is_lifetime": is_life}
+        current_tier = 0
+        current_min = 0
+        next_tier = None
+        next_min = None
+        for idx, r in enumerate(rows):
+            t = int(r[0]); m = int(r[1])
+            if life >= m:
+                current_tier = t
+                current_min = m
+                # continue to possibly higher tier
+            else:
+                next_tier = t
+                next_min = m
+                break
+        if next_tier is None:
+            # at or above highest tier
+            return {"success": True, "lifetime_seconds": life, "current_tier": current_tier, "next_tier": None, "current_min_seconds": current_min, "next_min_seconds": None, "to_next_seconds": None, "percent_to_next": 100.0, "is_lifetime": is_life}
+        denom = max(1, next_min - current_min)
+        done = max(0, life - current_min)
+        pct = max(0.0, min(100.0, (float(done) / float(denom)) * 100.0))
+        to_next = max(0, next_min - life)
+        return {"success": True, "lifetime_seconds": life, "current_tier": current_tier, "next_tier": next_tier, "current_min_seconds": current_min, "next_min_seconds": next_min, "to_next_seconds": to_next, "percent_to_next": pct, "is_lifetime": is_life}
+
 
 def set_earner_stake_tiers_defaults(db_path: Path) -> None:
     with connect(db_path) as conn:
@@ -347,6 +386,66 @@ def _ensure_premium(conn: sqlite3.Connection) -> None:
     cols = {row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
     if "premium_until" not in cols:
         conn.execute("ALTER TABLE users ADD COLUMN premium_until INTEGER NOT NULL DEFAULT 0")
+    # Premium tiers support: lifetime accumulation and lifetime flag
+    if "premium_lifetime_seconds" not in cols:
+        conn.execute("ALTER TABLE users ADD COLUMN premium_lifetime_seconds INTEGER NOT NULL DEFAULT 0")
+    if "premium_is_lifetime" not in cols:
+        conn.execute("ALTER TABLE users ADD COLUMN premium_is_lifetime INTEGER NOT NULL DEFAULT 0")
+
+def _ensure_premium_tiers(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS premium_tiers (
+            tier INTEGER PRIMARY KEY,
+            min_seconds INTEGER NOT NULL,
+            earn_bonus_percent REAL NOT NULL,
+            store_discount_percent REAL NOT NULL,
+            stat_cap_percent INTEGER NOT NULL
+        )
+        """
+    )
+    # Seed defaults if empty
+    try:
+        row = conn.execute("SELECT COUNT(*) FROM premium_tiers").fetchone()
+        if not row or int(row[0]) == 0:
+            seed_premium_tiers_defaults(conn)
+    except Exception:
+        # If the table is not accessible for some reason, ignore seeding
+        pass
+
+def seed_premium_tiers_defaults(conn: sqlite3.Connection) -> None:
+    # Thresholds cumulative: 1h, 1d, 1w, 1mo, 3mo, 6mo, 1y, 2y, 3y, 5y
+    H = 3600
+    D = 86400
+    W = 7 * D
+    MO = 30 * D
+    Y = 365 * D
+    tiers = [
+        (1, 1*H,    0.05, 0.05, 150),
+        (2, 1*D,    0.08, 0.08, 175),
+        (3, 1*W,    0.10, 0.10, 200),
+        (4, 1*MO,   0.12, 0.12, 225),
+        (5, 3*MO,   0.15, 0.15, 250),
+        (6, 6*MO,   0.18, 0.18, 300),
+        (7, 1*Y,    0.21, 0.21, 350),
+        (8, 2*Y,    0.24, 0.24, 400),
+        (9, 3*Y,    0.27, 0.27, 450),
+        (10, 5*Y,   0.30, 0.30, 500),
+    ]
+    _ensure_premium_tiers(conn)
+    conn.execute("DELETE FROM premium_tiers")
+    conn.executemany(
+        "INSERT INTO premium_tiers(tier, min_seconds, earn_bonus_percent, store_discount_percent, stat_cap_percent) VALUES (?,?,?,?,?)",
+        tiers,
+    )
+
+def _get_premium_tier_row(conn: sqlite3.Connection, lifetime_seconds: int) -> Optional[sqlite3.Row]:
+    _ensure_premium_tiers(conn)
+    row = conn.execute(
+        "SELECT tier, min_seconds, earn_bonus_percent, store_discount_percent, stat_cap_percent FROM premium_tiers WHERE min_seconds <= ? ORDER BY min_seconds DESC LIMIT 1",
+        (int(lifetime_seconds),),
+    ).fetchone()
+    return row
 
 def _ensure_store_prices(conn: sqlite3.Connection) -> None:
     conn.execute(
@@ -524,6 +623,21 @@ def gift_premium(db_path: Path, from_username: str, to_username: str, seconds: i
             start = base if base > now else now
             new_until = start + secs
             conn.execute("UPDATE users SET premium_until = ? WHERE id = ?", (new_until, int(r[0])))
+            # Increment recipient's lifetime accumulation per spec
+            conn.execute(
+                "UPDATE users SET premium_lifetime_seconds = premium_lifetime_seconds + ? WHERE id = ?",
+                (secs, int(r[0]))
+            )
+            # Unlock lifetime for recipient if threshold met
+            try:
+                thr = conn.execute("SELECT min_seconds FROM premium_tiers WHERE tier = 10").fetchone()
+                if thr:
+                    min10 = int(thr[0])
+                    cur_lt = conn.execute("SELECT premium_lifetime_seconds FROM users WHERE id = ?", (int(r[0]),)).fetchone()
+                    if cur_lt and int(cur_lt[0] or 0) >= min10:
+                        conn.execute("UPDATE users SET premium_is_lifetime = 1 WHERE id = ?", (int(r[0]),))
+            except Exception:
+                pass
             nb = conn.execute("SELECT balance_seconds FROM users WHERE id = ?", (int(g[0]),)).fetchone()[0]
             conn.commit()
             return {"success": True, "message": "Premium gifted", "from_balance": int(nb), "to_premium_until": int(new_until), "cost": int(cost)}
@@ -650,11 +764,20 @@ def apply_stat_changes(db_path: Path, username: str, delta_energy: int, delta_hu
             conn.execute("BEGIN IMMEDIATE")
             _ensure_stats(conn)
             _ensure_premium(conn)
-            u = conn.execute("SELECT id, energy, hunger, water, premium_until FROM users WHERE username = ?", (username,)).fetchone()
+            _ensure_premium_tiers(conn)
+            u = conn.execute("SELECT id, energy, hunger, water, premium_until, premium_is_lifetime, premium_lifetime_seconds FROM users WHERE username = ?", (username,)).fetchone()
             if not u:
                 conn.rollback(); out["message"] = "User not found"; return out
             import time as _t
-            upper = 250 if int(u[4] or 0) > int(_t.time()) else 100
+            now_ts = int(_t.time())
+            upper = 100
+            try:
+                is_life = int(u[5] or 0) == 1
+                if is_life or int(u[4] or 0) > now_ts:
+                    trow = _get_premium_tier_row(conn, int(u[6] or 0))
+                    upper = int(trow[4]) if trow else 250
+            except Exception:
+                upper = 250 if int(u[4] or 0) > now_ts else 100
             def cap(v: int) -> int:
                 return 0 if v < 0 else (upper if v > upper else v)
             new_energy = cap(int(u[1]) + int(delta_energy))
@@ -1024,10 +1147,21 @@ def purchase_store_item(db_path: Path, username: str, item: str, quantity: int, 
             curr_price = int(r[4])
             idx_percent = int(conn.execute("SELECT market_index_percent FROM time_store_config WHERE id = 1").fetchone()[0])
             effective = max(1, int(round(curr_price * (1.0 + float(idx_percent)/100.0))))
-            # Premium discount 10%
+            # Premium discount by tier if active (or lifetime)
             import time as _t
-            if int(u["premium_until"] or 0) > int(_t.time()):
-                effective = max(1, int(round(effective * 0.9)))
+            now_ts = int(_t.time())
+            is_lifetime = int(u.get("premium_is_lifetime", 0) if isinstance(u, sqlite3.Row) else 0) == 1
+            if is_lifetime or int(u["premium_until"] or 0) > now_ts:
+                # fetch tier
+                try:
+                    _ensure_premium_tiers(conn)
+                    row = conn.execute("SELECT premium_lifetime_seconds FROM users WHERE id = ?", (int(u["id"]),)).fetchone()
+                    lt = int(row[0]) if row and row[0] is not None else 0
+                    trow = _get_premium_tier_row(conn, lt)
+                    disc = float(trow[3]) if trow else 0.10
+                except Exception:
+                    disc = 0.10
+                effective = max(1, int(round(effective * (1.0 - disc))))
             total_cost = effective * q
             bal = int(u["balance_seconds"])
             if bal < total_cost:
@@ -1037,7 +1171,16 @@ def purchase_store_item(db_path: Path, username: str, item: str, quantity: int, 
             stored = False
             if apply_now:
                 # Apply stats
-                upper = 250 if int(u["premium_until"] or 0) > int(_t.time()) else 100
+                upper = 100
+                try:
+                    is_lifetime2 = int(u.get("premium_is_lifetime", 0) if isinstance(u, sqlite3.Row) else 0) == 1
+                    if is_lifetime2 or int(u["premium_until"] or 0) > now_ts:
+                        row2 = conn.execute("SELECT premium_lifetime_seconds FROM users WHERE id = ?", (int(u["id"]),)).fetchone()
+                        lt2 = int(row2[0]) if row2 and row2[0] is not None else 0
+                        trow2 = _get_premium_tier_row(conn, lt2)
+                        upper = int(trow2[4]) if trow2 else 250
+                except Exception:
+                    upper = 250 if int(u["premium_until"] or 0) > now_ts else 100
                 def cap(v: int) -> int: return 0 if v < 0 else (upper if v > upper else v)
                 new_energy = cap(int(u["energy"]) + int(r[1]) * q)
                 new_hunger = cap(int(u["hunger"]) + int(r[2]) * q)
@@ -1079,12 +1222,201 @@ def purchase_store_item(db_path: Path, username: str, item: str, quantity: int, 
 def is_premium(db_path: Path, username: str) -> Dict[str, Any]:
     with connect(db_path) as conn:
         _ensure_premium(conn)
-        row = conn.execute("SELECT premium_until FROM users WHERE username = ?", (username,)).fetchone()
+        _ensure_premium_tiers(conn)
+        row = conn.execute("SELECT premium_until, premium_is_lifetime, premium_lifetime_seconds FROM users WHERE username = ?", (username,)).fetchone()
         if not row:
-            return {"active": False, "until": 0}
+            return {"active": False, "until": 0, "is_lifetime": False, "tier": None}
         import time as _t
         until = int(row[0] or 0)
-        return {"active": until > int(_t.time()), "until": until}
+        is_life = int(row[1] or 0) == 1
+        lifetime = int(row[2] or 0)
+        trow = _get_premium_tier_row(conn, lifetime)
+        tier = int(trow[0]) if trow else 0
+        return {"active": (is_life or until > int(_t.time())), "until": until, "is_lifetime": is_life, "tier": tier}
+
+def get_user_premium_tier(db_path: Path, username: str) -> Dict[str, Any]:
+    with connect(db_path) as conn:
+        _ensure_premium(conn)
+        _ensure_premium_tiers(conn)
+        row = conn.execute("SELECT premium_lifetime_seconds FROM users WHERE username = ?", (username,)).fetchone()
+        if not row:
+            return {"tier": 0, "min_seconds": 0, "earn_bonus_percent": 0.0, "store_discount_percent": 0.0, "stat_cap_percent": 100}
+        lt = int(row[0] or 0)
+        trow = _get_premium_tier_row(conn, lt)
+        if not trow:
+            return {"tier": 0, "min_seconds": 0, "earn_bonus_percent": 0.0, "store_discount_percent": 0.0, "stat_cap_percent": 100}
+        return {
+            "tier": int(trow[0]),
+            "min_seconds": int(trow[1]),
+            "earn_bonus_percent": float(trow[2]),
+            "store_discount_percent": float(trow[3]),
+            "stat_cap_percent": int(trow[4]),
+        }
+
+# ---- Admin helpers: premium tiers management ----
+def list_premium_tiers(db_path: Path) -> list[dict]:
+    with connect(db_path) as conn:
+        _ensure_premium_tiers(conn)
+        rows = conn.execute(
+            "SELECT tier, min_seconds, earn_bonus_percent, store_discount_percent, stat_cap_percent FROM premium_tiers ORDER BY tier ASC"
+        ).fetchall()
+        return [
+            {
+                "tier": int(r[0]),
+                "min_seconds": int(r[1]),
+                "earn_bonus_percent": float(r[2]),
+                "store_discount_percent": float(r[3]),
+                "stat_cap_percent": int(r[4]),
+            }
+            for r in rows
+        ]
+
+def set_premium_tiers_defaults(db_path: Path) -> None:
+    with connect(db_path) as conn:
+        _ensure_premium_tiers(conn)
+        seed_premium_tiers_defaults(conn)
+        conn.commit()
+
+def add_or_replace_premium_tier(db_path: Path, tier: int, min_seconds: int, earn_bonus_percent: float, store_discount_percent: float, stat_cap_percent: int) -> None:
+    with connect(db_path) as conn:
+        _ensure_premium_tiers(conn)
+        conn.execute(
+            "INSERT INTO premium_tiers(tier, min_seconds, earn_bonus_percent, store_discount_percent, stat_cap_percent) VALUES (?,?,?,?,?)\n"
+            "ON CONFLICT(tier) DO UPDATE SET min_seconds=excluded.min_seconds, earn_bonus_percent=excluded.earn_bonus_percent, store_discount_percent=excluded.store_discount_percent, stat_cap_percent=excluded.stat_cap_percent",
+            (int(tier), int(min_seconds), float(earn_bonus_percent), float(store_discount_percent), int(stat_cap_percent)),
+        )
+        conn.commit()
+
+def remove_premium_tier(db_path: Path, tier: int) -> bool:
+    with connect(db_path) as conn:
+        _ensure_premium_tiers(conn)
+        cur = conn.execute("DELETE FROM premium_tiers WHERE tier = ?", (int(tier),))
+        conn.commit()
+        return (cur.rowcount or 0) > 0
+
+# ---- Admin helpers: user premium progression controls ----
+def set_user_premium_tier(db_path: Path, username: str, tier: int) -> Dict[str, Any]:
+    with connect(db_path) as conn:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            _ensure_premium(conn)
+            _ensure_premium_tiers(conn)
+            u = conn.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()
+            if not u:
+                conn.rollback(); return {"success": False, "message": "User not found"}
+            row = conn.execute("SELECT min_seconds FROM premium_tiers WHERE tier = ?", (int(tier),)).fetchone()
+            if not row:
+                conn.rollback(); return {"success": False, "message": "Tier not found"}
+            min_secs = int(row[0])
+            conn.execute("UPDATE users SET premium_lifetime_seconds = ?, premium_is_lifetime = CASE WHEN ? >= (SELECT min_seconds FROM premium_tiers WHERE tier = 10) THEN 1 ELSE premium_is_lifetime END WHERE id = ?", (min_secs, min_secs, int(u[0])))
+            conn.commit()
+            return {"success": True, "message": "User tier set", "tier": int(tier), "lifetime_seconds": int(min_secs)}
+        except Exception as e:
+            try: conn.rollback()
+            except Exception: pass
+            return {"success": False, "message": f"Set tier failed: {e}"}
+
+def reset_user_premium_progress(db_path: Path, username: str) -> Dict[str, Any]:
+    with connect(db_path) as conn:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            _ensure_premium(conn)
+            u = conn.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()
+            if not u:
+                conn.rollback(); return {"success": False, "message": "User not found"}
+            conn.execute("UPDATE users SET premium_lifetime_seconds = 0, premium_is_lifetime = 0 WHERE id = ?", (int(u[0]),))
+            conn.commit()
+            return {"success": True, "message": "User premium progression reset"}
+        except Exception as e:
+            try: conn.rollback()
+            except Exception: pass
+            return {"success": False, "message": f"Reset failed: {e}"}
+
+def set_user_premium_lifetime_seconds(db_path: Path, username: str, seconds: int) -> Dict[str, Any]:
+    with connect(db_path) as conn:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            _ensure_premium(conn)
+            _ensure_premium_tiers(conn)
+            u = conn.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()
+            if not u:
+                conn.rollback(); return {"success": False, "message": "User not found"}
+            secs = int(max(0, seconds))
+            conn.execute("UPDATE users SET premium_lifetime_seconds = ? WHERE id = ?", (secs, int(u[0])))
+            # adjust lifetime flag according to tier 10 threshold
+            try:
+                thr = conn.execute("SELECT min_seconds FROM premium_tiers WHERE tier = 10").fetchone()
+                if thr and secs >= int(thr[0]):
+                    conn.execute("UPDATE users SET premium_is_lifetime = 1 WHERE id = ?", (int(u[0]),))
+                else:
+                    conn.execute("UPDATE users SET premium_is_lifetime = 0 WHERE id = ?", (int(u[0]),))
+            except Exception:
+                pass
+            conn.commit()
+            return {"success": True, "message": "Lifetime seconds set", "lifetime_seconds": secs}
+        except Exception as e:
+            try: conn.rollback()
+            except Exception: pass
+            return {"success": False, "message": f"Set lifetime seconds failed: {e}"}
+
+def set_user_premium_lifetime(db_path: Path, username: str, on: bool) -> Dict[str, Any]:
+    with connect(db_path) as conn:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            _ensure_premium(conn)
+            u = conn.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()
+            if not u:
+                conn.rollback(); return {"success": False, "message": "User not found"}
+            conn.execute("UPDATE users SET premium_is_lifetime = ? WHERE id = ?", (1 if on else 0, int(u[0])))
+            conn.commit()
+            return {"success": True, "message": "Lifetime flag updated", "is_lifetime": bool(on)}
+        except Exception as e:
+            try: conn.rollback()
+            except Exception: pass
+            return {"success": False, "message": f"Set lifetime flag failed: {e}"}
+
+def backfill_lifetime_from_remaining(db_path: Path, username: Optional[str] = None, mode: str = "add") -> Dict[str, Any]:
+    """Backfill premium_lifetime_seconds from remaining premium time.
+    mode: 'add' to add remaining to existing lifetime; 'set' to replace with remaining.
+    If username is None or empty, process all users with active premium.
+    Returns: {success, message, updated}
+    """
+    import time as _t
+    now = int(_t.time())
+    mode_norm = (mode or "add").strip().lower()
+    if mode_norm not in ("add", "set"):
+        mode_norm = "add"
+    with connect(db_path) as conn:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            _ensure_premium(conn)
+            _ensure_premium_tiers(conn)
+            thr = conn.execute("SELECT min_seconds FROM premium_tiers WHERE tier = 10").fetchone()
+            tier10 = int(thr[0]) if thr else 0
+            updated = 0
+            if username:
+                rows = conn.execute("SELECT id, premium_until, premium_lifetime_seconds FROM users WHERE username = ?", (username,)).fetchall()
+            else:
+                rows = conn.execute("SELECT id, premium_until, premium_lifetime_seconds FROM users WHERE premium_until IS NOT NULL AND premium_until > ?", (now,)).fetchall()
+            for r in rows:
+                uid = int(r[0])
+                until = int(r[1] or 0)
+                remaining = max(0, until - now)
+                curr = int(r[2] or 0)
+                if mode_norm == "set":
+                    new_secs = remaining
+                else:
+                    new_secs = curr + remaining
+                conn.execute("UPDATE users SET premium_lifetime_seconds = ? WHERE id = ?", (int(new_secs), uid))
+                if tier10 > 0 and new_secs >= tier10:
+                    conn.execute("UPDATE users SET premium_is_lifetime = 1 WHERE id = ?", (uid,))
+                updated += 1
+            conn.commit()
+            return {"success": True, "message": "Backfill completed", "updated": int(updated)}
+        except Exception as e:
+            try: conn.rollback()
+            except Exception: pass
+            return {"success": False, "message": f"Backfill failed: {e}"}
 
 
 def purchase_premium(db_path: Path, username: str, seconds: int) -> Dict[str, Any]:
@@ -1119,6 +1451,21 @@ def purchase_premium(db_path: Path, username: str, seconds: int) -> Dict[str, An
             start = base if base > now else now
             new_until = start + secs
             conn.execute("UPDATE users SET premium_until = ? WHERE id = ?", (new_until, int(u[0])))
+            # Increment lifetime accumulation for buyer
+            conn.execute(
+                "UPDATE users SET premium_lifetime_seconds = premium_lifetime_seconds + ? WHERE id = ?",
+                (secs, int(u[0]))
+            )
+            # Unlock lifetime if threshold reached
+            try:
+                thr = conn.execute("SELECT min_seconds FROM premium_tiers WHERE tier = 10").fetchone()
+                if thr:
+                    min10 = int(thr[0])
+                    cur_lt = conn.execute("SELECT premium_lifetime_seconds FROM users WHERE id = ?", (int(u[0]),)).fetchone()
+                    if cur_lt and int(cur_lt[0] or 0) >= min10:
+                        conn.execute("UPDATE users SET premium_is_lifetime = 1 WHERE id = ?", (int(u[0]),))
+            except Exception:
+                pass
             nb = conn.execute("SELECT balance_seconds FROM users WHERE id = ?", (int(u[0]),)).fetchone()[0]
             conn.commit()
             return {"success": True, "message": "Premium purchased", "balance": int(nb), "premium_until": int(new_until), "cost": int(cost)}
@@ -1173,10 +1520,11 @@ def use_inventory_item(db_path: Path, username: str, item: str, quantity: int) -
             conn.execute("BEGIN IMMEDIATE")
             _ensure_stats(conn)
             _ensure_premium(conn)
+            _ensure_premium_tiers(conn)
             _ensure_user_inventory(conn)
             _ensure_store_catalog(conn)
             # Load user
-            u = conn.execute("SELECT id, energy, hunger, water, premium_until FROM users WHERE username = ?", (username,)).fetchone()
+            u = conn.execute("SELECT id, energy, hunger, water, premium_until, premium_is_lifetime, premium_lifetime_seconds FROM users WHERE username = ?", (username,)).fetchone()
             if not u:
                 conn.rollback(); return {"success": False, "message": "User not found"}
             # Check inventory
@@ -1188,7 +1536,15 @@ def use_inventory_item(db_path: Path, username: str, item: str, quantity: int) -
             if not eff:
                 conn.rollback(); return {"success": False, "message": "Item not found"}
             import time as _t
-            upper = 250 if int(u[4] or 0) > int(_t.time()) else 100
+            now_ts = int(_t.time())
+            upper = 100
+            try:
+                is_life = int(u[5] or 0) == 1
+                if is_life or int(u[4] or 0) > now_ts:
+                    trow = _get_premium_tier_row(conn, int(u[6] or 0))
+                    upper = int(trow[4]) if trow else 250
+            except Exception:
+                upper = 250 if int(u[4] or 0) > now_ts else 100
             def cap(v: int) -> int: return 0 if v < 0 else (upper if v > upper else v)
             new_energy = cap(int(u[1]) + int(eff[0]) * q)
             new_hunger = cap(int(u[2]) + int(eff[1]) * q)

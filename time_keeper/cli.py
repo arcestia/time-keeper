@@ -486,17 +486,31 @@ def interactive_menu(db_path: Path) -> None:
             bal = db.get_balance_seconds(current_db, uname) or 0
             status = "active" if current_user.get("active") else "deactivated"
             human = formatting.format_duration(int(bal), style="short", max_parts=2)
-            # Premium status display
+            # Premium status and tier display
             prem = db.is_premium(current_db, uname)
             import time as _t
             now = int(_t.time())
             prem_badge = "premium" if prem.get("active") else "standard"
+            # Tier: Roman numerals I-X
+            try:
+                tinfo = db.get_user_premium_tier(current_db, uname)
+                tier_num = int(tinfo.get("tier", 0) or 0)
+            except Exception:
+                tier_num = 0
+            romans = {1:"I",2:"II",3:"III",4:"IV",5:"V",6:"VI",7:"VII",8:"VIII",9:"IX",10:"X"}
+            print(Fore.CYAN + Style.BRIGHT + f"Logged in as: {uname} ({'admin' if is_admin else 'user'}) | Balance: {human} | Status: {status}")
+            # Separate concise Premium line
             if prem.get("active"):
                 rem = max(0, int(prem.get("until", 0)) - now)
-                prem_line = f" | Premium: active ({formatting.format_duration(rem, style='short')})"
+                if tier_num > 0:
+                    print(Fore.CYAN + Style.BRIGHT + f"Premium {romans.get(tier_num)}: active ({formatting.format_duration(rem, style='short')})")
+                else:
+                    print(Fore.CYAN + Style.BRIGHT + f"Premium: active ({formatting.format_duration(rem, style='short')})")
             else:
-                prem_line = " | Premium: inactive"
-            print(Fore.CYAN + Style.BRIGHT + f"Logged in as: {uname} ({'admin' if is_admin else 'user'}) | Balance: {human} | Status: {status}{prem_line}")
+                if tier_num > 0:
+                    print(Fore.CYAN + Style.BRIGHT + f"Premium {romans.get(tier_num)}: inactive")
+                else:
+                    print(Fore.CYAN + Style.BRIGHT + "Premium: inactive")
             print(f"{Fore.YELLOW}1){Style.RESET_ALL} Refresh balance")
             if is_admin:
                 print(f"{Fore.YELLOW}2){Style.RESET_ALL} Transfer time")
@@ -511,17 +525,15 @@ def interactive_menu(db_path: Path) -> None:
                 print(f"{Fore.YELLOW}11){Style.RESET_ALL} Run worker (background)")
                 print(f"{Fore.YELLOW}12){Style.RESET_ALL} Init DB")
                 print(f"{Fore.YELLOW}13){Style.RESET_ALL} Change DB path")
-                print(f"{Fore.YELLOW}14){Style.RESET_ALL} Buy Premium (1:3 pricing)")
-                print(f"{Fore.YELLOW}15){Style.RESET_ALL} Gift Premium to user (1:3 pricing)")
-                print(f"{Fore.YELLOW}16){Style.RESET_ALL} Logout")
+                print(f"{Fore.YELLOW}14){Style.RESET_ALL} Premium...")
+                print(f"{Fore.YELLOW}15){Style.RESET_ALL} Logout")
                 print(f"{Fore.YELLOW}0){Style.RESET_ALL} Quit")
             else:
                 print(f"{Fore.YELLOW}2){Style.RESET_ALL} Transfer time")
                 print(f"{Fore.YELLOW}3){Style.RESET_ALL} Leaderboard")
                 print(f"{Fore.YELLOW}4){Style.RESET_ALL} Users Stats")
-                print(f"{Fore.YELLOW}5){Style.RESET_ALL} Buy Premium (1:3 pricing)")
-                print(f"{Fore.YELLOW}6){Style.RESET_ALL} Gift Premium to user (1:3 pricing)")
-                print(f"{Fore.YELLOW}7){Style.RESET_ALL} Logout")
+                print(f"{Fore.YELLOW}5){Style.RESET_ALL} Premium...")
+                print(f"{Fore.YELLOW}6){Style.RESET_ALL} Logout")
                 print(f"{Fore.YELLOW}0){Style.RESET_ALL} Quit")
             choice = input("Choose: ").strip()
 
@@ -632,56 +644,287 @@ def interactive_menu(db_path: Path) -> None:
             elif is_admin and choice == "13":
                 new_db = _input_with_default("DB path", str(current_db))
                 current_db = Path(new_db)
-            elif (is_admin and choice == "14"):
-                # Buy premium for self
-                dur = _input_with_default("Premium duration (e.g., 3h)", "3h")
-                try:
-                    secs = int(formatting.parse_duration(dur))
-                except Exception:
-                    print(Fore.RED + "Invalid duration.")
-                    continue
-                # Confirm cost
-                cost = secs * 3
-                ans = _input_with_default(f"This will cost {formatting.format_duration(cost, style='short')}. Proceed? (y/N)", "n").strip().lower()
-                if ans not in ("y", "yes"):
-                    print("Cancelled.")
-                else:
-                    res = db.purchase_premium(current_db, uname, secs)
-                    if res.get("success"):
-                        until = int(res.get("premium_until", 0))
-                        rem = max(0, until - int(__import__('time').time()))
-                        print(Fore.GREEN + f"Premium updated. Remaining: {formatting.format_duration(rem, style='short')}. Balance: {formatting.format_duration(int(res.get('balance',0)), style='short')}")
-                    else:
-                        print(Fore.RED + res.get("message", "Failed to purchase premium"))
-            elif (is_admin and choice == "15"):
-                # Gift premium to another user
-                to_user = _input_with_default("Recipient username", "").strip()
-                if not to_user:
-                    print(Fore.RED + "Recipient username required.")
-                else:
-                    dur = _input_with_default("Premium duration (e.g., 3h)", "3h")
-                    try:
-                        secs = int(formatting.parse_duration(dur))
-                    except Exception:
-                        print(Fore.RED + "Invalid duration.")
-                        secs = 0
-                    if secs > 0:
-                        cost = secs * 3
-                        ans = _input_with_default(f"This will cost {formatting.format_duration(cost, style='short')} from your balance. Proceed? (y/N)", "n").strip().lower()
-                        if ans not in ("y", "yes"):
-                            print("Cancelled.")
-                        else:
-                            res = db.gift_premium(current_db, uname, to_user, secs)
-                            if res.get("success"):
-                                until = int(res.get("to_premium_until", 0))
-                                rem = max(0, until - int(__import__('time').time()))
-                                fb = int(res.get("from_balance", 0))
-                                print(Fore.GREEN + f"Premium gifted to {to_user}. Recipient remaining: {formatting.format_duration(rem, style='short')}. Your balance: {formatting.format_duration(fb, style='short')}")
+            elif (is_admin and choice == "14") or ((not is_admin) and choice == "5"):
+                # Premium submenu
+                while True:
+                    print("")
+                    print(Fore.CYAN + Style.BRIGHT + "== Premium ==")
+                    if is_admin:
+                        print(f"{Fore.YELLOW}1){Style.RESET_ALL} Buy Premium (self)")
+                        print(f"{Fore.YELLOW}2){Style.RESET_ALL} Gift Premium to user")
+                        print(f"{Fore.YELLOW}3){Style.RESET_ALL} List tiers")
+                        print(f"{Fore.YELLOW}4){Style.RESET_ALL} Set default tiers")
+                        print(f"{Fore.YELLOW}5){Style.RESET_ALL} Add/replace a tier")
+                        print(f"{Fore.YELLOW}6){Style.RESET_ALL} Remove a tier")
+                        print(f"{Fore.YELLOW}7){Style.RESET_ALL} Set user's tier")
+                        print(f"{Fore.YELLOW}8){Style.RESET_ALL} Reset user's progression")
+                        print(f"{Fore.YELLOW}9){Style.RESET_ALL} Set user's lifetime seconds")
+                        print(f"{Fore.YELLOW}10){Style.RESET_ALL} Toggle user's Lifetime")
+                        print(f"{Fore.YELLOW}11){Style.RESET_ALL} Backfill lifetime from remaining (admin)")
+                        print(f"{Fore.YELLOW}12){Style.RESET_ALL} View my progression")
+                        print(f"{Fore.YELLOW}13){Style.RESET_ALL} View a user's progression")
+                        print(f"{Fore.YELLOW}0){Style.RESET_ALL} Back")
+                        sel = input("Choose: ").strip()
+                        if sel == "0":
+                            break
+                        elif sel == "1":
+                            dur = _input_with_default("Premium duration (e.g., 3h)", "3h")
+                            try:
+                                secs = int(formatting.parse_duration(dur))
+                            except Exception:
+                                print(Fore.RED + "Invalid duration.")
+                                continue
+                            cost = secs * 3
+                            ans = _input_with_default(f"This will cost {formatting.format_duration(cost, style='short')}. Proceed? (y/N)", "n").strip().lower()
+                            if ans in ("y", "yes"):
+                                res = db.purchase_premium(current_db, uname, secs)
+                                if res.get("success"):
+                                    until = int(res.get("premium_until", 0))
+                                    rem = max(0, until - int(__import__('time').time()))
+                                    print(Fore.GREEN + f"Premium updated. Remaining: {formatting.format_duration(rem, style='short')}. Balance: {formatting.format_duration(int(res.get('balance',0)), style='short')}")
+                                else:
+                                    print(Fore.RED + res.get("message", "Failed to purchase premium"))
                             else:
-                                print(Fore.RED + res.get("message", "Failed to gift premium"))
-            elif (is_admin and choice == "16"):
-                current_user = None
-                print(Fore.YELLOW + "Logged out.")
+                                print("Cancelled.")
+                        elif sel == "2":
+                            to_user = _input_with_default("Recipient username", "").strip()
+                            if not to_user:
+                                print(Fore.RED + "Recipient username required.")
+                            else:
+                                dur = _input_with_default("Premium duration (e.g., 3h)", "3h")
+                                try:
+                                    secs = int(formatting.parse_duration(dur))
+                                except Exception:
+                                    print(Fore.RED + "Invalid duration.")
+                                    secs = 0
+                                if secs > 0:
+                                    cost = secs * 3
+                                    ans = _input_with_default(f"This will cost {formatting.format_duration(cost, style='short')} from your balance. Proceed? (y/N)", "n").strip().lower()
+                                    if ans in ("y", "yes"):
+                                        res = db.gift_premium(current_db, uname, to_user, secs)
+                                        if res.get("success"):
+                                            until = int(res.get("to_premium_until", 0))
+                                            rem = max(0, until - int(__import__('time').time()))
+                                            fb = int(res.get("from_balance", 0))
+                                            print(Fore.GREEN + f"Premium gifted to {to_user}. Recipient remaining: {formatting.format_duration(rem, style='short')}. Your balance: {formatting.format_duration(fb, style='short')}")
+                                        else:
+                                            print(Fore.RED + res.get("message", "Failed to gift premium"))
+                                    else:
+                                        print("Cancelled.")
+                        elif sel == "4":
+                            tiers = db.list_premium_tiers(current_db)
+                            if not tiers:
+                                print(Fore.YELLOW + "No premium tiers defined.")
+                            else:
+                                print(Fore.CYAN + Style.BRIGHT + "== Premium Tiers ==")
+                                print_table(["Tier", "Min", "Earn+%", "Store-%", "Cap%"], [[
+                                    str(t["tier"]),
+                                    formatting.format_duration(int(t["min_seconds"]), style='short'),
+                                    f"{float(t['earn_bonus_percent'])*100:.0f}%",
+                                    f"{float(t['store_discount_percent'])*100:.0f}%",
+                                    str(int(t['stat_cap_percent']))
+                                ] for t in tiers])
+                        elif sel == "4":
+                            db.set_premium_tiers_defaults(current_db)
+                            print(Fore.GREEN + "Premium tiers set to defaults.")
+                        elif sel == "5":
+                            try:
+                                tr = _input_int_with_default("Tier number (1-10)", 1)
+                                mins = _input_duration_with_default("Min cumulative purchased time", 3600)
+                                earnp = _input_float_with_default("Earn bonus percent (e.g., 0.10)", 0.10)
+                                storep = _input_float_with_default("Store discount percent (e.g., 0.10)", 0.10)
+                                cap = _input_int_with_default("Stat cap percent (e.g., 250)", 250)
+                                db.add_or_replace_premium_tier(current_db, tr, mins, earnp, storep, cap)
+                                print(Fore.GREEN + "Premium tier saved.")
+                            except Exception as e:
+                                print(Fore.RED + f"Failed to save tier: {e}")
+                        elif sel == "6":
+                            tr = _input_int_with_default("Tier number to remove", 1)
+                            ok = db.remove_premium_tier(current_db, tr)
+                            print(Fore.GREEN + ("Tier removed." if ok else "Tier not found."))
+                        elif sel == "7":
+                            target = _input_with_default("Username to set tier", "")
+                            if not target:
+                                print(Fore.RED + "Username required.")
+                            else:
+                                tr = _input_int_with_default("Tier number", 1)
+                                res = db.set_user_premium_tier(current_db, target, tr)
+                                if res.get("success"):
+                                    print(Fore.GREEN + f"Set {target} to Tier {tr}.")
+                                else:
+                                    print(Fore.RED + res.get("message", "Failed"))
+                        elif sel == "8":
+                            target = _input_with_default("Username to reset progression", "")
+                            if not target:
+                                print(Fore.RED + "Username required.")
+                            else:
+                                res = db.reset_user_premium_progress(current_db, target)
+                                if res.get("success"):
+                                    print(Fore.GREEN + f"Reset progression for {target}.")
+                                else:
+                                    print(Fore.RED + res.get("message", "Failed"))
+                        elif sel == "9":
+                            target = _input_with_default("Username to set lifetime seconds", "")
+                            if not target:
+                                print(Fore.RED + "Username required.")
+                            else:
+                                try:
+                                    secs = _input_duration_with_default("Lifetime seconds value", 0)
+                                    res = db.set_user_premium_lifetime_seconds(current_db, target, int(secs))
+                                    if res.get("success"):
+                                        print(Fore.GREEN + f"Lifetime seconds updated for {target}.")
+                                    else:
+                                        print(Fore.RED + res.get("message", "Failed"))
+                                except Exception as e:
+                                    print(Fore.RED + f"Failed: {e}")
+                        elif sel == "10":
+                            target = _input_with_default("Username to toggle Lifetime", "")
+                            if not target:
+                                print(Fore.RED + "Username required.")
+                            else:
+                                on = _input_with_default("Turn Lifetime on? (y/N)", "n").strip().lower() in ("y","yes")
+                                res = db.set_user_premium_lifetime(current_db, target, on)
+                                if res.get("success"):
+                                    print(Fore.GREEN + f"Lifetime {'enabled' if on else 'disabled'} for {target}.")
+                                else:
+                                    print(Fore.RED + res.get("message", "Failed"))
+                        elif sel == "11":
+                            scope = _input_with_default("Scope: all or one? (all/one)", "all").strip().lower()
+                            mode = _input_with_default("Mode: add or set lifetime from remaining? (add/set)", "add").strip().lower()
+                            if scope == "one":
+                                target = _input_with_default("Username", "").strip()
+                                if not target:
+                                    print(Fore.RED + "Username required.")
+                                else:
+                                    res = db.backfill_lifetime_from_remaining(current_db, target, mode)
+                                    if res.get("success"):
+                                        print(Fore.GREEN + f"Backfill completed. Updated: {int(res.get('updated',0))}")
+                                    else:
+                                        print(Fore.RED + res.get("message", "Failed"))
+                            else:
+                                res = db.backfill_lifetime_from_remaining(current_db, None, mode)
+                                if res.get("success"):
+                                    print(Fore.GREEN + f"Backfill completed. Updated: {int(res.get('updated',0))}")
+                                else:
+                                    print(Fore.RED + res.get("message", "Failed"))
+                        elif sel == "12":
+                            info = db.get_user_premium_progress(current_db, uname)
+                            if not info.get("success", True):
+                                print(Fore.RED + info.get("message", "Failed"))
+                            else:
+                                life = int(info.get("lifetime_seconds", 0))
+                                tier = int(info.get("current_tier", 0))
+                                ntier = info.get("next_tier")
+                                to_next = info.get("to_next_seconds")
+                                pct = float(info.get("percent_to_next", 0.0))
+                                bar_w = 30
+                                filled = int(round((pct/100.0) * bar_w))
+                                bar = ("#" * filled) + ("-" * (bar_w - filled))
+                                print(Fore.CYAN + Style.BRIGHT + f"Tier {tier}  |  Lifetime: {formatting.format_duration(life, style='short')}")
+                                if ntier is None:
+                                    print(Fore.GREEN + "Max tier reached. Progress: [##############################] 100%")
+                                else:
+                                    print(f"Next: Tier {int(ntier)}  |  To next: {formatting.format_duration(int(to_next), style='short')}  |  {pct:.1f}%")
+                                    print(f"[{bar}] {pct:.1f}%")
+                        elif sel == "13":
+                            target = _input_with_default("Username to view progression", "").strip()
+                            if not target:
+                                print(Fore.RED + "Username required.")
+                            else:
+                                info = db.get_user_premium_progress(current_db, target)
+                                if not info.get("success", True):
+                                    print(Fore.RED + info.get("message", "Failed"))
+                                else:
+                                    life = int(info.get("lifetime_seconds", 0))
+                                    tier = int(info.get("current_tier", 0))
+                                    ntier = info.get("next_tier")
+                                    to_next = info.get("to_next_seconds")
+                                    pct = float(info.get("percent_to_next", 0.0))
+                                    bar_w = 30
+                                    filled = int(round((pct/100.0) * bar_w))
+                                    bar = ("#" * filled) + ("-" * (bar_w - filled))
+                                    print(Fore.CYAN + Style.BRIGHT + f"{target} — Tier {tier}  |  Lifetime: {formatting.format_duration(life, style='short')}")
+                                    if ntier is None:
+                                        print(Fore.GREEN + "Max tier reached. Progress: [##############################] 100%")
+                                    else:
+                                        print(f"Next: Tier {int(ntier)}  |  To next: {formatting.format_duration(int(to_next), style='short')}  |  {pct:.1f}%")
+                                        print(f"[{bar}] {pct:.1f}%")
+                        else:
+                            print(Fore.RED + "Invalid choice")
+                    else:
+                        print(f"{Fore.YELLOW}1){Style.RESET_ALL} Buy Premium (self)")
+                        print(f"{Fore.YELLOW}2){Style.RESET_ALL} Gift Premium to user")
+                        print(f"{Fore.YELLOW}3){Style.RESET_ALL} View my progression")
+                        print(f"{Fore.YELLOW}4){Style.RESET_ALL} View tiers")
+                        print(f"{Fore.YELLOW}0){Style.RESET_ALL} Back")
+                        sel = input("Choose: ").strip()
+                        if sel == "0":
+                            break
+                        elif sel == "1":
+                            dur = _input_with_default("Premium duration (e.g., 3h)", "3h")
+                            try:
+                                secs = int(formatting.parse_duration(dur))
+                            except Exception:
+                                print(Fore.RED + "Invalid duration.")
+                                continue
+                            cost = secs * 3
+                            ans = _input_with_default(f"This will cost {formatting.format_duration(cost, style='short')}. Proceed? (y/N)", "n").strip().lower()
+                            if ans in ("y", "yes"):
+                                res = db.purchase_premium(current_db, uname, secs)
+                                if res.get("success"):
+                                    until = int(res.get("premium_until", 0))
+                                    rem = max(0, until - int(__import__('time').time()))
+                                    print(Fore.GREEN + f"Premium updated. Remaining: {formatting.format_duration(rem, style='short')}. Balance: {formatting.format_duration(int(res.get('balance',0)), style='short')}")
+                                else:
+                                    print(Fore.RED + res.get("message", "Failed to purchase premium"))
+                            else:
+                                print("Cancelled.")
+                        elif sel == "2":
+                            to_user = _input_with_default("Recipient username", "").strip()
+                            if not to_user:
+                                print(Fore.RED + "Recipient username required.")
+                            else:
+                                dur = _input_with_default("Premium duration (e.g., 3h)", "3h")
+                                try:
+                                    secs = int(formatting.parse_duration(dur))
+                                except Exception:
+                                    print(Fore.RED + "Invalid duration.")
+                                    secs = 0
+                                if secs > 0:
+                                    cost = secs * 3
+                                    ans = _input_with_default(f"This will cost {formatting.format_duration(cost, style='short')} from your balance. Proceed? (y/N)", "n").strip().lower()
+                                    if ans in ("y", "yes"):
+                                        res = db.gift_premium(current_db, uname, to_user, secs)
+                                        if res.get("success"):
+                                            until = int(res.get("to_premium_until", 0))
+                                            rem = max(0, until - int(__import__('time').time()))
+                                            fb = int(res.get("from_balance", 0))
+                                            print(Fore.GREEN + f"Premium gifted to {to_user}. Recipient remaining: {formatting.format_duration(rem, style='short')}. Your balance: {formatting.format_duration(fb, style='short')}")
+                                        else:
+                                            print(Fore.RED + res.get("message", "Failed to gift premium"))
+                                    else:
+                                        print("Cancelled.")
+                        elif sel == "3":
+                            info = db.get_user_premium_progress(current_db, uname)
+                            if not info.get("success", True):
+                                print(Fore.RED + info.get("message", "Failed"))
+                            else:
+                                life = int(info.get("lifetime_seconds", 0))
+                                tier = int(info.get("current_tier", 0))
+                                ntier = info.get("next_tier")
+                                to_next = info.get("to_next_seconds")
+                                pct = float(info.get("percent_to_next", 0.0))
+                                bar_w = 30
+                                filled = int(round((pct/100.0) * bar_w))
+                                bar = ("#" * filled) + ("-" * (bar_w - filled))
+                                print(Fore.CYAN + Style.BRIGHT + f"Tier {tier}  |  Lifetime: {formatting.format_duration(life, style='short')}")
+                                if ntier is None:
+                                    print(Fore.GREEN + "Max tier reached. Progress: [##############################] 100%")
+                                else:
+                                    print(f"Next: Tier {int(ntier)}  |  To next: {formatting.format_duration(int(to_next), style='short')}  |  {pct:.1f}%")
+                                    print(f"[{bar}] {pct:.1f}%")
+                        else:
+                            print(Fore.RED + "Invalid choice")
             elif (not is_admin and choice == "2"):
                 # transfer for normal user
                 to_user = input("Send to username: ").strip()
@@ -701,53 +944,8 @@ def interactive_menu(db_path: Path) -> None:
             elif (not is_admin and choice == "4"):
                 # Users Stats for current user
                 print_user_stats(current_db, uname)
-            elif (not is_admin and choice == "5"):
-                # Buy premium for self
-                dur = _input_with_default("Premium duration (e.g., 3h)", "3h")
-                try:
-                    secs = int(formatting.parse_duration(dur))
-                except Exception:
-                    print(Fore.RED + "Invalid duration.")
-                    continue
-                cost = secs * 3
-                ans = _input_with_default(f"This will cost {formatting.format_duration(cost, style='short')}. Proceed? (y/N)", "n").strip().lower()
-                if ans not in ("y", "yes"):
-                    print("Cancelled.")
-                else:
-                    res = db.purchase_premium(current_db, uname, secs)
-                    if res.get("success"):
-                        until = int(res.get("premium_until", 0))
-                        rem = max(0, until - int(__import__('time').time()))
-                        print(Fore.GREEN + f"Premium updated. Remaining: {formatting.format_duration(rem, style='short')}. Balance: {formatting.format_duration(int(res.get('balance',0)), style='short')}")
-                    else:
-                        print(Fore.RED + res.get("message", "Failed to purchase premium"))
             elif (not is_admin and choice == "6"):
-                # Gift premium to another user
-                to_user = _input_with_default("Recipient username", "").strip()
-                if not to_user:
-                    print(Fore.RED + "Recipient username required.")
-                else:
-                    dur = _input_with_default("Premium duration (e.g., 3h)", "3h")
-                    try:
-                        secs = int(formatting.parse_duration(dur))
-                    except Exception:
-                        print(Fore.RED + "Invalid duration.")
-                        secs = 0
-                    if secs > 0:
-                        cost = secs * 3
-                        ans = _input_with_default(f"This will cost {formatting.format_duration(cost, style='short')} from your balance. Proceed? (y/N)", "n").strip().lower()
-                        if ans not in ("y", "yes"):
-                            print("Cancelled.")
-                        else:
-                            res = db.gift_premium(current_db, uname, to_user, secs)
-                            if res.get("success"):
-                                until = int(res.get("to_premium_until", 0))
-                                rem = max(0, until - int(__import__('time').time()))
-                                fb = int(res.get("from_balance", 0))
-                                print(Fore.GREEN + f"Premium gifted to {to_user}. Recipient remaining: {formatting.format_duration(rem, style='short')}. Your balance: {formatting.format_duration(fb, style='short')}")
-                            else:
-                                print(Fore.RED + res.get("message", "Failed to gift premium"))
-            elif (not is_admin and choice == "7"):
+                # Logout
                 current_user = None
                 print(Fore.YELLOW + "Logged out.")
             else:

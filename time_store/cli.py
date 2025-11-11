@@ -36,13 +36,25 @@ def _premium_info(db_path: Path, username: Optional[str]) -> tuple[bool, int]:
     try:
         p = tkdb.is_premium(db_path, username)
         import time as _t
-        active = bool(p.get("active")) and int(p.get("until", 0)) > int(_t.time())
+        active = bool(p.get("active"))
         rem = 0
         if active:
             rem = max(0, int(p.get("until", 0)) - int(_t.time()))
         return (active, rem)
     except Exception:
         return (False, 0)
+
+def _premium_tier_discount(db_path: Path, username: Optional[str]) -> tuple[int, float]:
+    """Return (tier_number, store_discount_percent as fraction)."""
+    if not username:
+        return (0, 0.0)
+    try:
+        t = tkdb.get_user_premium_tier(db_path, username)
+        tier_num = int(t.get("tier", 0) or 0)
+        disc = float(t.get("store_discount_percent", 0.0) or 0.0)
+        return (tier_num, disc)
+    except Exception:
+        return (0, 0.0)
 
 
 def cmd_list(db_path: Path, username: Optional[str] = None) -> None:
@@ -51,9 +63,10 @@ def cmd_list(db_path: Path, username: Optional[str] = None) -> None:
         print(Fore.YELLOW + "No items in the store yet. Ask admin to add some.")
         return
     prem_active, _ = _premium_info(db_path, username)
+    tier_num, disc_frac = _premium_tier_discount(db_path, username)
     headers = ["ID", "Key", "Name", "Kind", "Qty", "Restores", "Price (eff)"]
     if prem_active:
-        headers.append("Your price (-10%)")
+        headers.append(f"Your price (-{int(disc_frac*100)}%)")
     rows = []
     idx = tkdb.get_market_index_percent(db_path)
     for it in items:
@@ -75,7 +88,7 @@ def cmd_list(db_path: Path, username: Optional[str] = None) -> None:
             formatting.format_duration(it["effective_price_seconds"], style="short") + f"  (idx {idx}%)",
         ]
         if prem_active:
-            your = max(1, int(round(int(it["effective_price_seconds"]) * 0.9)))
+            your = max(1, int(round(int(it["effective_price_seconds"]) * (1.0 - float(disc_frac)))))
             row.append(formatting.format_duration(your, style="short"))
         rows.append(row)
     _print_table(headers, rows)
@@ -105,9 +118,10 @@ def cmd_prices(db_path: Path, username: Optional[str] = None) -> None:
         return
     # We don't have names in the prices table; join comes in list view.
     prem_active, _ = _premium_info(db_path, username)
+    _, disc_frac = _premium_tier_discount(db_path, username)
     headers = ["Item", "Base", "Current", "Effective", "Index"]
     if prem_active:
-        headers.append("Your price (-10%)")
+        headers.append(f"Your price (-{int(disc_frac*100)}%)")
     rows = []
     for p in prices:
         effective = max(1, int(round(p["current_price_seconds"] * (1.0 + float(idx)/100.0))))
@@ -119,7 +133,7 @@ def cmd_prices(db_path: Path, username: Optional[str] = None) -> None:
             f"{idx}%",
         ]
         if prem_active:
-            your = max(1, int(round(effective * 0.9)))
+            your = max(1, int(round(effective * (1.0 - float(disc_frac)))))
             row.append(formatting.format_duration(your, style="short"))
         rows.append(row)
     _print_table(headers, rows)
@@ -328,8 +342,27 @@ def interactive_menu(db_path: Path) -> None:
             uname = current_user.get("username")
             is_admin = bool(current_user.get("is_admin"))
             prem_active, prem_rem = _premium_info(db_path, uname)
-            prem_line = f" | Premium: active ({formatting.format_duration(prem_rem, style='short')})" if prem_active else " | Premium: inactive"
-            print(Fore.CYAN + Style.BRIGHT + f"Logged in as: {uname} ({'admin' if is_admin else 'user'}){prem_line}")
+            tier_num, _disc = _premium_tier_discount(db_path, uname)
+            romans = {1:"I",2:"II",3:"III",4:"IV",5:"V",6:"VI",7:"VII",8:"VIII",9:"IX",10:"X"}
+            print(Fore.CYAN + Style.BRIGHT + f"Logged in as: {uname} ({'admin' if is_admin else 'user'})")
+            if prem_active:
+                if tier_num > 0:
+                    print(Fore.CYAN + Style.BRIGHT + f"Premium {romans.get(tier_num)}: active ({formatting.format_duration(prem_rem, style='short')})")
+                else:
+                    print(Fore.CYAN + Style.BRIGHT + f"Premium: active ({formatting.format_duration(prem_rem, style='short')})")
+                # Show benefits
+                try:
+                    tinfo = tkdb.get_user_premium_tier(db_path, uname)
+                    disc = int(round(float(tinfo.get("store_discount_percent", 0.0)) * 100))
+                    cap = int(tinfo.get("stat_cap_percent", 100))
+                    print(Fore.GREEN + f"Benefits: -{disc}% store prices; stat cap {cap}%")
+                except Exception:
+                    pass
+            else:
+                if tier_num > 0:
+                    print(Fore.CYAN + Style.BRIGHT + f"Premium {romans.get(tier_num)}: inactive")
+                else:
+                    print(Fore.CYAN + Style.BRIGHT + "Premium: inactive")
             if is_admin:
                 print(f"{Fore.YELLOW}1){Style.RESET_ALL} List items")
                 print(f"{Fore.YELLOW}2){Style.RESET_ALL} Show prices")

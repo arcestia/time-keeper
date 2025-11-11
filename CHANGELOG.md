@@ -41,8 +41,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   - Promo config (admin): base percent, per-block percent, min seconds, block seconds; enable/disable promo and set default bonus when disabled. Interactive admin option and `set-promo` subcommand added.
   - Migration: added `time_earner_config` with safe column migrations for `promo_enabled` and `default_bonus_percent`.
   - Split configs: separate promo vs default configs with dedicated tables. New `set-default` subcommand and interactive admin option. `open-session` uses Default config when Promo is disabled.
-  - UI: Promo status line displayed under the interactive header for logged-in users.
-  - UI: Simplified promo status display to "Promo: ongoing/disabled" and removed promo details from the open earning menu label.
+-  - UI: Promo status line displayed under the interactive header for logged-in users.
+-  - UI: Simplified promo status display to "Promo: ongoing/disabled" and removed promo details from the open earning menu label.
+ -  - Time Keeper: reorganized interactive menu and introduced a Premium submenu (buy/gift; admin: list/set defaults/add/remove tiers; set/reset user tier/lifetime).
+ -  - Admin tool: Backfill premium lifetime from remaining premium time (scope: all/one; mode: add/set). Adjusts tiers and Lifetime flag when thresholds are met. Available under Time Keeper Premium submenu.
+ -  - Premium UI: Users can view their Premium tier progression with an ASCII progress bar to the next tier; admins can view any user's progression. Available under Time Keeper Premium submenu.
+ -  - Bugfix (Time Keeper): Non-admin Logout now correctly logs out (option 6). Removed legacy Buy/Gift Premium handlers from main menu; these actions live in the Premium submenu.
   - Staking config (admin): configurable minimum stake duration and reward multiplier for option 1.
     - CLI: `time_earner.cli set-stake-config --admin <user> --min-seconds <n> --multiplier <x>`.
     - Interactive: "Set stake config (admin)" option.
@@ -54,9 +58,20 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   - Stake earning session now displays live stats (Energy/Hunger/Water) alongside the countdown.
   - Sessions warn once at 50% (notice) and 20% (warning) thresholds for each stat.
   - If any stat reaches 0%: stake session ends and forfeits the stake; open session ends with 0 reward.
-  - Premium status:
+- Premium status:
     - Pricing: 1:3 (1 hour premium costs 3 hours balance). Minimum 3h if not already premium; can extend with any positive duration while active.
-    - Benefits: stat caps increase to 250% (Energy/Hunger/Water), 10% Time Store discount, and +10% bonus on all earning claims (stake and open).
+    - Premium Tiers: accumulation-based tiers (progress never resets) with increasing benefits when Premium is active.
+      - Tier thresholds (cumulative purchased): 1h, 1d, 1w, 1mo, 3mo, 6mo, 1y, 2y, 3y, 5y.
+      - Tier benefits scale from Tier 1 to Tier 10:
+        - Earn bonus: +5% → +30%
+        - Store discount: −5% → −30%
+        - Stat cap: 150% → 500%
+      - Tier 10 (5 years cumulative) unlocks Lifetime Premium (always active).
+      - Gifting Premium counts toward the recipient’s cumulative total.
+    - Legacy fixed benefits are replaced by tiered values where applicable:
+      - Time Earner: +tier earn bonus at claim/stop time when Premium active/Lifetime.
+      - Time Store: personalized discounted prices ("Your price (-X%)") and purchase cost use tier discount when Premium active/Lifetime.
+      - Stat caps for restores/use follow tier cap when Premium active/Lifetime.
   - New app `time_store`:
 - New app `time_store`:
   - CLI to list items with qty and effective prices, buy items to restore stats (energy/hunger/water), and manage store as admin.

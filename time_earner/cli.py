@@ -266,9 +266,11 @@ def start_earn_session(db_path: Path, username: str, stake_seconds: int) -> dict
     premium_extra = 0
     prem = db.is_premium(db_path, username)
     import time as _t
-    if bool(prem.get("active")) and int(prem.get("until", 0)) > int(_t.time()):
+    if bool(prem.get("active")):
+        tier = db.get_user_premium_tier(db_path, username)
+        bonus_pct = float(tier.get("earn_bonus_percent", 0.10))
         premium_applied = True
-        premium_extra = int(round(base_reward * 0.10))
+        premium_extra = int(round(base_reward * bonus_pct))
     reward = int(base_reward + premium_extra)
     with db.connect(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -345,8 +347,14 @@ def start_open_earn_session(db_path: Path, username: str) -> dict:
                     penalized = int(round(total_base * 0.75))
                     prem = db.is_premium(db_path, username)
                     import time as _t
-                    premium_applied = bool(prem.get("active")) and int(prem.get("until", 0)) > int(_t.time())
-                    premium_extra = int(round(penalized * 0.10)) if premium_applied else 0
+                    if bool(prem.get("active")):
+                        tier = db.get_user_premium_tier(db_path, username)
+                        bonus_pct = float(tier.get("earn_bonus_percent", 0.10))
+                        premium_applied = True
+                        premium_extra = int(round(penalized * bonus_pct))
+                    else:
+                        premium_applied = False
+                        premium_extra = 0
                     final_add = int(penalized + premium_extra)
                     with db.connect(db_path) as conn2:
                         conn2.execute("BEGIN IMMEDIATE")
@@ -419,8 +427,14 @@ def start_open_earn_session(db_path: Path, username: str) -> dict:
                             # Apply premium +10% if active at stop time
                             prem = db.is_premium(db_path, username)
                             import time as _t
-                            premium_applied = bool(prem.get("active")) and int(prem.get("until", 0)) > int(_t.time())
-                            premium_extra = int(round(penalized * 0.10)) if premium_applied else 0
+                            if bool(prem.get("active")):
+                                tier = db.get_user_premium_tier(db_path, username)
+                                bonus_pct = float(tier.get("earn_bonus_percent", 0.10))
+                                premium_applied = True
+                                premium_extra = int(round(penalized * bonus_pct))
+                            else:
+                                premium_applied = False
+                                premium_extra = 0
                             final_add = int(penalized + premium_extra)
                             with db.connect(db_path) as conn2:
                                 conn2.execute("BEGIN IMMEDIATE")
@@ -473,9 +487,11 @@ def start_open_earn_session(db_path: Path, username: str) -> dict:
     premium_extra = 0
     prem = db.is_premium(db_path, username)
     import time as _t
-    if bool(prem.get("active")) and int(prem.get("until", 0)) > int(_t.time()):
+    if bool(prem.get("active")):
+        tier = db.get_user_premium_tier(db_path, username)
+        bonus_pct = float(tier.get("earn_bonus_percent", 0.10))
         premium_applied = True
-        premium_extra = int(round(total_add_base * 0.10))
+        premium_extra = int(round(total_add_base * bonus_pct))
     total_add = int(total_add_base + premium_extra)
     with db.connect(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -577,8 +593,34 @@ def interactive_menu(db_path: Path) -> None:
             bal = db.get_balance_seconds(current_db, uname) or 0
             human = formatting.format_duration(int(bal), style="short", max_parts=2)
             prem_active, prem_rem = _premium_info(current_db, uname)
-            prem_line = f" | Premium: active ({formatting.format_duration(prem_rem, style='short')})" if prem_active else " | Premium: inactive"
-            print(Fore.CYAN + Style.BRIGHT + f"Logged in as: {uname} | Balance: {human}{prem_line}")
+            # Determine tier for display
+            tier_num = 0
+            try:
+                tinfo = db.get_user_premium_tier(current_db, uname)
+                tier_num = int(tinfo.get("tier", 0))
+            except Exception:
+                tier_num = 0
+            # Header and concise Premium line
+            print(Fore.CYAN + Style.BRIGHT + f"Logged in as: {uname} | Balance: {human}")
+            romans = {1:"I",2:"II",3:"III",4:"IV",5:"V",6:"VI",7:"VII",8:"VIII",9:"IX",10:"X"}
+            if prem_active:
+                if tier_num > 0:
+                    print(Fore.CYAN + Style.BRIGHT + f"Premium {romans.get(tier_num)}: active ({formatting.format_duration(prem_rem, style='short')})")
+                else:
+                    print(Fore.CYAN + Style.BRIGHT + f"Premium: active ({formatting.format_duration(prem_rem, style='short')})")
+                # Show benefits
+                try:
+                    tinfo = db.get_user_premium_tier(current_db, uname)
+                    earn = int(round(float(tinfo.get("earn_bonus_percent", 0.0)) * 100))
+                    cap = int(tinfo.get("stat_cap_percent", 100))
+                    print(Fore.GREEN + f"Benefits: +{earn}% earn bonus; stat cap {cap}%")
+                except Exception:
+                    pass
+            else:
+                if tier_num > 0:
+                    print(Fore.CYAN + Style.BRIGHT + f"Premium {romans.get(tier_num)}: inactive")
+                else:
+                    print(Fore.CYAN + Style.BRIGHT + "Premium: inactive")
             # Show promo status line immediately under header
             print(_format_promo_line(current_db))
             print(f"{Fore.YELLOW}1){Style.RESET_ALL} Start earning session (stake and countdown)")
@@ -615,7 +657,13 @@ def interactive_menu(db_path: Path) -> None:
                     nb = res.get("balance", 0)
                     line = f"Success! Rewarded {formatting.format_duration(reward, style='short')}"
                     if res.get("premium_applied") and int(res.get("premium_extra", 0)) > 0:
-                        line += f" (includes +10% Premium: {formatting.format_duration(int(res['premium_extra']), style='short')})"
+                        # show actual tier percent
+                        try:
+                            tinfo = db.get_user_premium_tier(current_db, uname)
+                            pct = float(tinfo.get("earn_bonus_percent", 0.10)) * 100.0
+                        except Exception:
+                            pct = 10.0
+                        line += f" (includes +{pct:.0f}% Premium: {formatting.format_duration(int(res['premium_extra']), style='short')})"
                     print(Fore.GREEN + line + f". New balance: {formatting.format_duration(nb, style='short')}.")
                 else:
                     nb = res.get("balance", 0)
@@ -634,7 +682,12 @@ def interactive_menu(db_path: Path) -> None:
                         loss = int(res.get("penalty_loss", 0))
                         msg += f" - penalty 25% ({formatting.format_duration(loss, style='short')})"
                     if res.get("premium_applied") and int(res.get("premium_extra", 0)) > 0:
-                        msg += f" + Premium +10% {formatting.format_duration(int(res['premium_extra']), style='short')}"
+                        try:
+                            tinfo = db.get_user_premium_tier(current_db, uname)
+                            pct = float(tinfo.get("earn_bonus_percent", 0.10)) * 100.0
+                        except Exception:
+                            pct = 10.0
+                        msg += f" + Premium +{pct:.0f}% {formatting.format_duration(int(res['premium_extra']), style='short')}"
                     msg += f" = {formatting.format_duration(reward, style='short')}. New balance: {formatting.format_duration(nb, style='short')}."
                     print(Fore.GREEN + msg)
                 else:
