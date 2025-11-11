@@ -35,6 +35,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   - Output now shows bonus percentage in claims (e.g., "+6.5%").
   - Premium integration: header shows Premium status with remaining time; +10% bonus on claim when Premium active at claim time.
   - Open session behavior: if any stat reaches 0%, the session stops immediately and grants a penalized reward (−25% of what would have been added at that moment). Premium +10% bonus still applies after the penalty if Premium is active.
+  - Zero-balance behavior: if the user's balance reaches 0 during a session, it auto-closes.
+    - Stake session: ends immediately with stake forfeited.
+    - Open session: stops and grants reward with a 25% penalty; Premium +10% still applies if active at stop.
   - Promo config (admin): base percent, per-block percent, min seconds, block seconds; enable/disable promo and set default bonus when disabled. Interactive admin option and `set-promo` subcommand added.
   - Migration: added `time_earner_config` with safe column migrations for `promo_enabled` and `default_bonus_percent`.
   - Split configs: separate promo vs default configs with dedicated tables. New `set-default` subcommand and interactive admin option. `open-session` uses Default config when Promo is disabled.
@@ -47,13 +50,14 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   - Users can view stake tiers from the interactive menu ("View stake tiers"). Falls back to single-rule display when no tiers are defined.
   - Earning sessions now deplete user stats every 10 minutes (default rates): Energy 0.75%, Hunger 0.5%, Water 1.0%. Future update will make these rates configurable.
   - Open earning session now displays live stats (Energy/Hunger/Water) alongside elapsed time.
+  - Open earning session now displays live Balance and Premium remaining alongside the elapsed line.
   - Stake earning session now displays live stats (Energy/Hunger/Water) alongside the countdown.
   - Sessions warn once at 50% (notice) and 20% (warning) thresholds for each stat.
   - If any stat reaches 0%: stake session ends and forfeits the stake; open session ends with 0 reward.
   - Premium status:
     - Pricing: 1:3 (1 hour premium costs 3 hours balance). Minimum 3h if not already premium; can extend with any positive duration while active.
     - Benefits: stat caps increase to 250% (Energy/Hunger/Water), 10% Time Store discount, and +10% bonus on all earning claims (stake and open).
-    - Interactive: "Buy Premium" option added in Time Keeper menu; header shows Premium status and remaining time.
+  - New app `time_store`:
 - New app `time_store`:
   - CLI to list items with qty and effective prices, buy items to restore stats (energy/hunger/water), and manage store as admin.
   - Market index supported in range -50%..+300% (default 0%). Effective price = current_price * (1 + index%).
@@ -66,6 +70,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
     - Interactive buy prompts: "Apply now? (Y/n)".
     - New commands: `inventory-list`, `inventory-use` (accept key or ID).
     - Interactive menu: Inventory viewing and using items.
+    - Logged-in Premium users now see personalized discounted prices in List and Prices views (column: "Your price (-10%)").
     - New: Users can send inventory items to other users.
       - Interactive: "Send inventory item" option (admin and user menus).
       - CLI: `inventory-send --from-username <user> --to-username <user> (--item <key> | --item-id <id>) --qty <n>`.

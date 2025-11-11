@@ -182,6 +182,7 @@ def start_earn_session(db_path: Path, username: str, stake_seconds: int) -> dict
         warned_energy = 0
         warned_hunger = 0
         warned_water = 0
+        last_bal_check = 0
         while remaining > 0:
             # print once per second
             if remaining != last_print:
@@ -195,8 +196,18 @@ def start_earn_session(db_path: Path, username: str, stake_seconds: int) -> dict
                 last_print = remaining
             time.sleep(1)
             remaining -= 1
-            # Every 10 minutes, deplete stats by 1%
+            # Periodically check if user balance has hit zero (e.g., background deductions)
             now = int(time.time())
+            if now - last_bal_check >= 5:
+                try:
+                    bal_now = int(db.get_balance_seconds(db_path, username) or 0)
+                    if bal_now <= 0:
+                        print("\n" + Fore.RED + Style.BRIGHT + "Balance reached 0. Session ended. Stake forfeited.")
+                        return {"success": False, "message": "Forfeited (balance reached 0)", "balance": 0}
+                except Exception:
+                    pass
+                last_bal_check = now
+            # Every 10 minutes, deplete stats by 1%
             if now - last_deplete >= 600:
                 # Advance ticks in case multiple intervals passed
                 intervals = (now - last_deplete) // 600
@@ -306,9 +317,59 @@ def start_open_earn_session(db_path: Path, username: str) -> dict:
                     stat_line = f" | Energy {int(stats['energy'])}%  Hunger {int(stats['hunger'])}%  Water {int(stats['water'])}%"
                 except Exception:
                     stat_line = ""
-                sys.stdout.write("\r" + f"Elapsed: {formatting.format_duration(elapsed, style='short', max_parts=2)}{stat_line}    ")
+                # Also show user's current balance and premium remaining time
+                try:
+                    bal_live = int(db.get_balance_seconds(db_path, username) or 0)
+                    bal_line = f" | Balance {formatting.format_duration(bal_live, style='short', max_parts=2)}"
+                except Exception:
+                    bal_line = ""
+                try:
+                    prem_active, prem_rem = _premium_info(db_path, username)
+                    prem_line = f" | Premium {formatting.format_duration(prem_rem, style='short')}" if prem_active else ""
+                except Exception:
+                    prem_line = ""
+                sys.stdout.write("\r" + f"Elapsed: {formatting.format_duration(elapsed, style='short', max_parts=2)}{stat_line}{bal_line}{prem_line}    ")
                 sys.stdout.flush()
                 last_print = elapsed
+            # Check balance hit zero -> stop with 25% penalty path similar to stat-zero
+            try:
+                bal_now = int(db.get_balance_seconds(db_path, username) or 0)
+                if bal_now <= 0:
+                    stop_ts = int(time.time())
+                    print("\n" + Fore.RED + Style.BRIGHT + "Balance reached 0. Session stopped (25% penalty applied).")
+                    elapsed_stop = stop_ts - start_ts
+                    blocks_stop = elapsed_stop // block_seconds
+                    rate_stop = float(base + per_block * max(0, blocks_stop - 1))
+                    bonus_stop = int(round(elapsed_stop * rate_stop))
+                    total_base = int(elapsed_stop + bonus_stop)
+                    penalized = int(round(total_base * 0.75))
+                    prem = db.is_premium(db_path, username)
+                    import time as _t
+                    premium_applied = bool(prem.get("active")) and int(prem.get("until", 0)) > int(_t.time())
+                    premium_extra = int(round(penalized * 0.10)) if premium_applied else 0
+                    final_add = int(penalized + premium_extra)
+                    with db.connect(db_path) as conn2:
+                        conn2.execute("BEGIN IMMEDIATE")
+                        conn2.execute("UPDATE users SET balance_seconds = balance_seconds + ? WHERE username = ?", (final_add, username))
+                        bal2 = conn2.execute("SELECT balance_seconds FROM users WHERE username = ?", (username,)).fetchone()[0]
+                        conn2.commit()
+                    return {
+                        "success": True,
+                        "message": "Session ended (balance reached 0, penalty applied)",
+                        "balance": int(bal2),
+                        "reward": int(final_add),
+                        "elapsed": int(elapsed_stop),
+                        "bonus": int(bonus_stop),
+                        "rate": rate_stop,
+                        "penalty_applied": True,
+                        "penalty_percent": 25,
+                        "penalty_loss": int(max(0, total_base - penalized)),
+                        "premium_applied": premium_applied,
+                        "premium_extra": int(premium_extra),
+                        "base_reward": int(total_base)
+                    }
+            except Exception:
+                pass
             # Apply depletion when passing each 10-minute boundary
             now = int(time.time())
             if now >= next_deplete_at:

@@ -445,9 +445,9 @@ def interactive_menu(db_path: Path) -> None:
                     print(Fore.RED + "Invalid choice")
             else:
                 if choice == "1":
-                    cmd_list(db_path)
+                    cmd_list(db_path, username=uname)
                 elif choice == "2":
-                    cmd_prices(db_path)
+                    cmd_prices(db_path, username=uname)
                 elif choice == "3":
                     item = input("Item to buy (ID or key): ").strip()
                     qty = _input_int_with_default("Qty", 1)
