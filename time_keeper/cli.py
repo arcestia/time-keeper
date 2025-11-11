@@ -688,16 +688,7 @@ def interactive_menu(db_path: Path) -> None:
                                     print(Fore.RED + res.get("message", "Failed to purchase premium"))
                             else:
                                 print("Cancelled.")
-                        elif sel == "4":
-                            res = db.premium_daily_restore(current_db, uname)
-                            if res.get("success"):
-                                print(Fore.GREEN + f"Restored to cap. Energy {res['energy']}%  Hunger {res['hunger']}%  Water {res['water']}%")
-                            else:
-                                msg = res.get("message", "Failed")
-                                nxt = res.get("next_available_seconds")
-                                if nxt is not None:
-                                    msg += f" (next in {formatting.format_duration(int(nxt), style='short')})"
-                                print(Fore.RED + msg)
+                        
                         elif sel == "2":
                             to_user = _input_with_default("Recipient username", "").strip()
                             if not to_user:
@@ -723,7 +714,7 @@ def interactive_menu(db_path: Path) -> None:
                                             print(Fore.RED + res.get("message", "Failed to gift premium"))
                                     else:
                                         print("Cancelled.")
-                        elif sel == "4":
+                        elif sel == "3":
                             tiers = db.list_premium_tiers(current_db)
                             if not tiers:
                                 print(Fore.YELLOW + "No premium tiers defined.")
@@ -871,7 +862,7 @@ def interactive_menu(db_path: Path) -> None:
                                 if nxt is not None:
                                     msg += f" (next in {formatting.format_duration(int(nxt), style='short')})"
                                 print(Fore.RED + msg)
-                        elif sel == "15":
+                        elif sel == "15" and is_admin:
                             target = _input_with_default("Username to restore", "").strip()
                             if not target:
                                 print(Fore.RED + "Username required.")
@@ -961,8 +952,21 @@ def interactive_menu(db_path: Path) -> None:
                                 else:
                                     print(f"Next: Tier {int(ntier)}  |  To next: {formatting.format_duration(int(to_next), style='short')}  |  {pct:.1f}%")
                                     print(f"[{bar}] {pct:.1f}%")
+                        elif sel == "4":
+                            res = db.premium_daily_restore(current_db, uname)
+                            if res.get("success"):
+                                print(Fore.GREEN + f"Restored to cap. Energy {res['energy']}%  Hunger {res['hunger']}%  Water {res['water']}%")
+                            else:
+                                msg = res.get("message", "Failed")
+                                nxt = res.get("next_available_seconds")
+                                if nxt is not None:
+                                    msg += f" (next in {formatting.format_duration(int(nxt), style='short')})"
+                                print(Fore.RED + msg)
                         else:
                             print(Fore.RED + "Invalid choice")
+            elif is_admin and choice == "15":
+                current_user = None
+                print(Fore.YELLOW + "Logged out.")
             elif (not is_admin and choice == "2"):
                 # transfer for normal user
                 to_user = input("Send to username: ").strip()
