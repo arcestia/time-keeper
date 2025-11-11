@@ -1418,6 +1418,67 @@ def backfill_lifetime_from_remaining(db_path: Path, username: Optional[str] = No
             except Exception: pass
             return {"success": False, "message": f"Backfill failed: {e}"}
 
+# ---- Daily premium restore (once every 24h) ----
+def _ensure_premium_daily(conn: sqlite3.Connection) -> None:
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
+        if "premium_last_daily_restore" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN premium_last_daily_restore INTEGER")
+    except Exception:
+        pass
+
+def premium_daily_restore(db_path: Path, username: str) -> Dict[str, Any]:
+    """Allow a premium user to restore stats (energy/hunger/water) to their tier max cap once every 24h.
+    Returns: {success, message, energy, hunger, water, next_available_seconds}
+    """
+    import time as _t
+    now = int(_t.time())
+    with connect(db_path) as conn:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            _ensure_stats(conn)
+            _ensure_premium(conn)
+            _ensure_premium_tiers(conn)
+            _ensure_premium_daily(conn)
+            u = conn.execute(
+                "SELECT id, active, energy, hunger, water, premium_until, premium_is_lifetime, premium_last_daily_restore "
+                "FROM users WHERE username = ?",
+                (username,)
+            ).fetchone()
+            if not u:
+                conn.rollback(); return {"success": False, "message": "User not found"}
+            if not int(u[1]):
+                conn.rollback(); return {"success": False, "message": "Account is deactivated"}
+            prem_active = (int(u[6] or 0) == 1) or (int(u[5] or 0) > now)
+            if not prem_active:
+                conn.rollback(); return {"success": False, "message": "Premium required"}
+            last = int(u[7] or 0)
+            if last and (now - last) < 86400:
+                remaining = 86400 - (now - last)
+                conn.rollback(); return {"success": False, "message": "Restore available later", "next_available_seconds": int(remaining)}
+            # Resolve cap from tier
+            prow = conn.execute(
+                "SELECT t.stat_cap_percent FROM premium_tiers t WHERE t.tier = (\n"
+                "  SELECT COALESCE(MAX(t2.tier), 0) FROM premium_tiers t2 WHERE t2.min_seconds <= (\n"
+                "    SELECT premium_lifetime_seconds FROM users WHERE id = ?\n"
+                "  )\n"
+                ")",
+                (int(u[0]),)
+            ).fetchone()
+            cap = int(prow[0]) if prow and int(prow[0]) > 0 else 100
+            # Set all three stats to cap (do not exceed cap)
+            conn.execute(
+                "UPDATE users SET energy = ?, hunger = ?, water = ?, premium_last_daily_restore = ? WHERE id = ?",
+                (cap, cap, cap, now, int(u[0]))
+            )
+            post = conn.execute("SELECT energy, hunger, water FROM users WHERE id = ?", (int(u[0]),)).fetchone()
+            conn.commit()
+            return {"success": True, "message": "Restored to cap", "energy": int(post[0]), "hunger": int(post[1]), "water": int(post[2]), "next_available_seconds": 86400}
+        except Exception as e:
+            try: conn.rollback()
+            except Exception: pass
+            return {"success": False, "message": f"Daily restore failed: {e}"}
+
 
 def purchase_premium(db_path: Path, username: str, seconds: int) -> Dict[str, Any]:
     """Purchase premium at 1:3 pricing. Min 3h if not currently premium; allow any positive extension if active.

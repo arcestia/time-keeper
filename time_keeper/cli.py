@@ -663,6 +663,8 @@ def interactive_menu(db_path: Path) -> None:
                         print(f"{Fore.YELLOW}11){Style.RESET_ALL} Backfill lifetime from remaining (admin)")
                         print(f"{Fore.YELLOW}12){Style.RESET_ALL} View my progression")
                         print(f"{Fore.YELLOW}13){Style.RESET_ALL} View a user's progression")
+                        print(f"{Fore.YELLOW}14){Style.RESET_ALL} Restore stats to cap (self, 24h cool-down)")
+                        print(f"{Fore.YELLOW}15){Style.RESET_ALL} Restore stats to cap for a user (admin)")
                         print(f"{Fore.YELLOW}0){Style.RESET_ALL} Back")
                         sel = input("Choose: ").strip()
                         if sel == "0":
@@ -686,6 +688,16 @@ def interactive_menu(db_path: Path) -> None:
                                     print(Fore.RED + res.get("message", "Failed to purchase premium"))
                             else:
                                 print("Cancelled.")
+                        elif sel == "4":
+                            res = db.premium_daily_restore(current_db, uname)
+                            if res.get("success"):
+                                print(Fore.GREEN + f"Restored to cap. Energy {res['energy']}%  Hunger {res['hunger']}%  Water {res['water']}%")
+                            else:
+                                msg = res.get("message", "Failed")
+                                nxt = res.get("next_available_seconds")
+                                if nxt is not None:
+                                    msg += f" (next in {formatting.format_duration(int(nxt), style='short')})"
+                                print(Fore.RED + msg)
                         elif sel == "2":
                             to_user = _input_with_default("Recipient username", "").strip()
                             if not to_user:
@@ -849,13 +861,39 @@ def interactive_menu(db_path: Path) -> None:
                                     else:
                                         print(f"Next: Tier {int(ntier)}  |  To next: {formatting.format_duration(int(to_next), style='short')}  |  {pct:.1f}%")
                                         print(f"[{bar}] {pct:.1f}%")
+                        elif sel == "14":
+                            res = db.premium_daily_restore(current_db, uname)
+                            if res.get("success"):
+                                print(Fore.GREEN + f"Restored to cap. Energy {res['energy']}%  Hunger {res['hunger']}%  Water {res['water']}%")
+                            else:
+                                msg = res.get("message", "Failed")
+                                nxt = res.get("next_available_seconds")
+                                if nxt is not None:
+                                    msg += f" (next in {formatting.format_duration(int(nxt), style='short')})"
+                                print(Fore.RED + msg)
+                        elif sel == "15":
+                            target = _input_with_default("Username to restore", "").strip()
+                            if not target:
+                                print(Fore.RED + "Username required.")
+                            else:
+                                res = db.premium_daily_restore(current_db, target)
+                                if res.get("success"):
+                                    print(Fore.GREEN + f"Restored {target} to cap. Energy {res['energy']}%  Hunger {res['hunger']}%  Water {res['water']}%")
+                                else:
+                                    msg = res.get("message", "Failed")
+                                    nxt = res.get("next_available_seconds")
+                                    if nxt is not None:
+                                        msg += f" (next in {formatting.format_duration(int(nxt), style='short')})"
+                                    print(Fore.RED + msg)
                         else:
                             print(Fore.RED + "Invalid choice")
                     else:
                         print(f"{Fore.YELLOW}1){Style.RESET_ALL} Buy Premium (self)")
                         print(f"{Fore.YELLOW}2){Style.RESET_ALL} Gift Premium to user")
                         print(f"{Fore.YELLOW}3){Style.RESET_ALL} View my progression")
-                        print(f"{Fore.YELLOW}4){Style.RESET_ALL} View tiers")
+                        print(f"{Fore.YELLOW}4){Style.RESET_ALL} Restore stats to cap (24h cool-down)")
+                        if is_admin:
+                            print(f"{Fore.YELLOW}5){Style.RESET_ALL} Restore stats to cap for user")
                         print(f"{Fore.YELLOW}0){Style.RESET_ALL} Back")
                         sel = input("Choose: ").strip()
                         if sel == "0":

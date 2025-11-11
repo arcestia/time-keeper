@@ -47,6 +47,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
  -  - Admin tool: Backfill premium lifetime from remaining premium time (scope: all/one; mode: add/set). Adjusts tiers and Lifetime flag when thresholds are met. Available under Time Keeper Premium submenu.
  -  - Premium UI: Users can view their Premium tier progression with an ASCII progress bar to the next tier; admins can view any user's progression. Available under Time Keeper Premium submenu.
  -  - Bugfix (Time Keeper): Non-admin Logout now correctly logs out (option 6). Removed legacy Buy/Gift Premium handlers from main menu; these actions live in the Premium submenu.
+ -  - Premium: Daily stat restore for premium users. Once every 24h, users can restore Energy/Hunger/Water to their tier's stat cap. Accessible from Time Keeper Premium submenu (self and admin-for-user). Cooldown enforced.
   - Staking config (admin): configurable minimum stake duration and reward multiplier for option 1.
     - CLI: `time_earner.cli set-stake-config --admin <user> --min-seconds <n> --multiplier <x>`.
     - Interactive: "Set stake config (admin)" option.
