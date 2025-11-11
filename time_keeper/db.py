@@ -55,6 +55,224 @@ def init_db(db_path: Path) -> None:
         conn.executescript(SCHEMA_SQL)
         conn.commit()
 
+
+# New separated configs
+def _ensure_earner_promo_config(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS time_earner_promo_config (
+            id INTEGER PRIMARY KEY CHECK(id=1),
+            base_percent REAL,
+            per_block_percent REAL,
+            min_seconds INTEGER,
+            block_seconds INTEGER,
+            promo_enabled INTEGER
+        )
+        """
+    )
+    conn.execute("INSERT OR IGNORE INTO time_earner_promo_config(id) VALUES (1)")
+    conn.execute("UPDATE time_earner_promo_config SET base_percent = COALESCE(base_percent, 0.10) WHERE id = 1")
+    conn.execute("UPDATE time_earner_promo_config SET per_block_percent = COALESCE(per_block_percent, 0.0125) WHERE id = 1")
+    conn.execute("UPDATE time_earner_promo_config SET min_seconds = COALESCE(min_seconds, 600) WHERE id = 1")
+    conn.execute("UPDATE time_earner_promo_config SET block_seconds = COALESCE(block_seconds, 600) WHERE id = 1")
+    conn.execute("UPDATE time_earner_promo_config SET promo_enabled = COALESCE(promo_enabled, 1) WHERE id = 1")
+
+
+# ---- Time Earner staking tiers ----
+def _ensure_earner_stake_tiers(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS time_earner_stake_tiers (
+            min_seconds INTEGER PRIMARY KEY,
+            multiplier REAL NOT NULL
+        )
+        """
+    )
+
+
+def seed_stake_tiers_balanced_defaults(conn: sqlite3.Connection) -> None:
+    # Balanced progression up to 10x
+    tiers = [
+        (2*3600, 1.5),
+        (6*3600, 2.0),
+        (12*3600, 2.75),
+        (24*3600, 4.0),
+        (36*3600, 5.0),
+        (48*3600, 6.0),
+        (72*3600, 7.5),
+        (96*3600, 8.5),
+        (120*3600, 9.25),
+        (144*3600, 10.0),
+    ]
+    conn.execute("DELETE FROM time_earner_stake_tiers")
+    conn.executemany(
+        "INSERT INTO time_earner_stake_tiers(min_seconds, multiplier) VALUES (?, ?)", tiers
+    )
+
+
+def list_earner_stake_tiers(db_path: Path) -> List[Dict[str, Any]]:
+    with connect(db_path) as conn:
+        _ensure_earner_stake_tiers(conn)
+        rows = conn.execute(
+            "SELECT min_seconds, multiplier FROM time_earner_stake_tiers ORDER BY min_seconds ASC"
+        ).fetchall()
+        return [
+            {"min_seconds": int(r[0]), "multiplier": float(r[1])}
+            for r in rows
+        ]
+
+
+def set_earner_stake_tiers_defaults(db_path: Path) -> None:
+    with connect(db_path) as conn:
+        _ensure_earner_stake_tiers(conn)
+        seed_stake_tiers_balanced_defaults(conn)
+        conn.commit()
+
+
+def add_earner_stake_tier(db_path: Path, min_seconds: int, multiplier: float) -> None:
+    with connect(db_path) as conn:
+        _ensure_earner_stake_tiers(conn)
+        conn.execute(
+            "INSERT OR REPLACE INTO time_earner_stake_tiers(min_seconds, multiplier) VALUES (?, ?)",
+            (int(min_seconds), float(multiplier)),
+        )
+        conn.commit()
+
+
+def remove_earner_stake_tier(db_path: Path, min_seconds: int) -> bool:
+    with connect(db_path) as conn:
+        _ensure_earner_stake_tiers(conn)
+        cur = conn.execute(
+            "DELETE FROM time_earner_stake_tiers WHERE min_seconds = ?", (int(min_seconds),)
+        )
+        conn.commit()
+        return (cur.rowcount or 0) > 0
+
+
+def clear_earner_stake_tiers(db_path: Path) -> None:
+    with connect(db_path) as conn:
+        _ensure_earner_stake_tiers(conn)
+        conn.execute("DELETE FROM time_earner_stake_tiers")
+        conn.commit()
+
+
+def get_multiplier_for_stake(db_path: Path, stake_seconds: int) -> Optional[float]:
+    with connect(db_path) as conn:
+        _ensure_earner_stake_tiers(conn)
+        row = conn.execute(
+            "SELECT multiplier FROM time_earner_stake_tiers WHERE min_seconds <= ? ORDER BY min_seconds DESC LIMIT 1",
+            (int(stake_seconds),),
+        ).fetchone()
+        return float(row[0]) if row else None
+
+
+def _ensure_earner_default_config(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS time_earner_default_config (
+            id INTEGER PRIMARY KEY CHECK(id=1),
+            base_percent REAL,
+            per_block_percent REAL,
+            min_seconds INTEGER,
+            block_seconds INTEGER
+        )
+        """
+    )
+    conn.execute("INSERT OR IGNORE INTO time_earner_default_config(id) VALUES (1)")
+    conn.execute("UPDATE time_earner_default_config SET base_percent = COALESCE(base_percent, 0.10) WHERE id = 1")
+    conn.execute("UPDATE time_earner_default_config SET per_block_percent = COALESCE(per_block_percent, 0.0125) WHERE id = 1")
+    conn.execute("UPDATE time_earner_default_config SET min_seconds = COALESCE(min_seconds, 600) WHERE id = 1")
+    conn.execute("UPDATE time_earner_default_config SET block_seconds = COALESCE(block_seconds, 600) WHERE id = 1")
+
+
+def get_earner_default_config(db_path: Path) -> Dict[str, float | int]:
+    with connect(db_path) as conn:
+        _ensure_earner_default_config(conn)
+        row = conn.execute(
+            "SELECT base_percent, per_block_percent, min_seconds, block_seconds FROM time_earner_default_config WHERE id = 1"
+        ).fetchone()
+        return {
+            "base_percent": float(row[0]),
+            "per_block_percent": float(row[1]),
+            "min_seconds": int(row[2]),
+            "block_seconds": int(row[3]),
+        }
+
+
+def set_earner_default_config(db_path: Path, base_percent: float, per_block_percent: float, min_seconds: int, block_seconds: int) -> None:
+    b = float(base_percent); p = float(per_block_percent); mn = int(max(1, min_seconds)); bs = int(max(1, block_seconds))
+    with connect(db_path) as conn:
+        _ensure_earner_default_config(conn)
+        conn.execute(
+            "INSERT INTO time_earner_default_config(id, base_percent, per_block_percent, min_seconds, block_seconds) VALUES (1, ?, ?, ?, ?)\n"
+            "ON CONFLICT(id) DO UPDATE SET base_percent=excluded.base_percent, per_block_percent=excluded.per_block_percent, min_seconds=excluded.min_seconds, block_seconds=excluded.block_seconds",
+            (b, p, mn, bs),
+        )
+        conn.commit()
+
+
+def get_earner_promo_config(db_path: Path) -> Dict[str, float | int]:
+    """Override to prefer separated promo config if present; fallback to legacy table."""
+    with connect(db_path) as conn:
+        # Try new table
+        try:
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(time_earner_promo_config)").fetchall()}
+            if cols:
+                _ensure_earner_promo_config(conn)
+                row = conn.execute(
+                    "SELECT base_percent, per_block_percent, min_seconds, block_seconds, promo_enabled FROM time_earner_promo_config WHERE id = 1"
+                ).fetchone()
+                return {
+                    "base_percent": float(row[0]),
+                    "per_block_percent": float(row[1]),
+                    "min_seconds": int(row[2]),
+                    "block_seconds": int(row[3]),
+                    "promo_enabled": int(row[4]),
+                    # Legacy compatible keys
+                    "default_bonus_percent": 0.10,
+                    "default_per_block_percent": 0.0,
+                }
+        except Exception:
+            pass
+    # Fallback to legacy combined table
+    return get_earner_promo_config.__wrapped__(db_path)  # type: ignore
+
+
+# ---- Time Earner stake config ----
+def _ensure_earner_stake_config(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS time_earner_stake_config (
+            id INTEGER PRIMARY KEY CHECK(id=1),
+            min_stake_seconds INTEGER,
+            reward_multiplier REAL
+        )
+        """
+    )
+    conn.execute("INSERT OR IGNORE INTO time_earner_stake_config(id) VALUES (1)")
+    conn.execute("UPDATE time_earner_stake_config SET min_stake_seconds = COALESCE(min_stake_seconds, 7200) WHERE id = 1")
+    conn.execute("UPDATE time_earner_stake_config SET reward_multiplier = COALESCE(reward_multiplier, 2.0) WHERE id = 1")
+
+
+def get_earner_stake_config(db_path: Path) -> Dict[str, float | int]:
+    with connect(db_path) as conn:
+        _ensure_earner_stake_config(conn)
+        row = conn.execute("SELECT min_stake_seconds, reward_multiplier FROM time_earner_stake_config WHERE id = 1").fetchone()
+        return {"min_stake_seconds": int(row[0]), "reward_multiplier": float(row[1])}
+
+
+def set_earner_stake_config(db_path: Path, min_stake_seconds: int, reward_multiplier: float) -> None:
+    mn = int(max(1, min_stake_seconds))
+    rm = float(reward_multiplier)
+    with connect(db_path) as conn:
+        _ensure_earner_stake_config(conn)
+        conn.execute(
+            "INSERT INTO time_earner_stake_config(id, min_stake_seconds, reward_multiplier) VALUES (1, ?, ?)\n"
+            "ON CONFLICT(id) DO UPDATE SET min_stake_seconds = excluded.min_stake_seconds, reward_multiplier = excluded.reward_multiplier",
+            (mn, rm),
+        )
+        conn.commit()
+
 def _ensure_reserves(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """
@@ -123,6 +341,12 @@ def _ensure_stats(conn: sqlite3.Connection) -> None:
         to_add.append("ALTER TABLE users ADD COLUMN water INTEGER NOT NULL DEFAULT 100")
     for sql in to_add:
         conn.execute(sql)
+
+def _ensure_premium(conn: sqlite3.Connection) -> None:
+    # Add premium_until epoch seconds to users if missing
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+    if "premium_until" not in cols:
+        conn.execute("ALTER TABLE users ADD COLUMN premium_until INTEGER NOT NULL DEFAULT 0")
 
 def _ensure_store_prices(conn: sqlite3.Connection) -> None:
     conn.execute(
@@ -258,6 +482,56 @@ def transfer_from_reserves(db_path: Path, to_username: str, amount_seconds: int)
             return result
 
 
+def gift_premium(db_path: Path, from_username: str, to_username: str, seconds: int) -> Dict[str, Any]:
+    """Buy Premium time for another user.
+    Charges the giver at 1:3 pricing, applies duration to recipient's premium_until.
+    Minimum 3h applies if the recipient is not currently premium; if active, any positive duration allowed.
+    Returns: {success, message, from_balance, to_premium_until, cost}
+    """
+    secs = int(seconds)
+    res: Dict[str, Any] = {"success": False, "message": ""}
+    if secs <= 0:
+        res["message"] = "Duration must be > 0"; return res
+    if from_username == to_username:
+        # Delegate to normal purchase for clarity
+        return purchase_premium(db_path, from_username, secs)
+    with connect(db_path) as conn:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            _ensure_premium(conn)
+            g = conn.execute("SELECT id, active, balance_seconds FROM users WHERE username = ?", (from_username,)).fetchone()
+            r = conn.execute("SELECT id, active, premium_until FROM users WHERE username = ?", (to_username,)).fetchone()
+            if not g:
+                res["message"] = "Giver not found"; conn.rollback(); return res
+            if not r:
+                res["message"] = "Recipient not found"; conn.rollback(); return res
+            if not int(g[1]):
+                res["message"] = "Giver account is deactivated"; conn.rollback(); return res
+            if not int(r[1]):
+                res["message"] = "Recipient account is deactivated"; conn.rollback(); return res
+            import time as _t
+            now = int(_t.time())
+            r_active = int(r[2] or 0) > now
+            if not r_active and secs < 10800:
+                res["message"] = "Minimum 3h for first Premium for recipient"; conn.rollback(); return res
+            cost = secs * 3
+            if int(g[2]) < cost:
+                res["message"] = "Insufficient balance"; conn.rollback(); return res
+            # Deduct from giver
+            conn.execute("UPDATE users SET balance_seconds = balance_seconds - ? WHERE id = ?", (cost, int(g[0])))
+            # Extend recipient premium
+            base = int(r[2] or 0)
+            start = base if base > now else now
+            new_until = start + secs
+            conn.execute("UPDATE users SET premium_until = ? WHERE id = ?", (new_until, int(r[0])))
+            nb = conn.execute("SELECT balance_seconds FROM users WHERE id = ?", (int(g[0]),)).fetchone()[0]
+            conn.commit()
+            return {"success": True, "message": "Premium gifted", "from_balance": int(nb), "to_premium_until": int(new_until), "cost": int(cost)}
+        except Exception as e:
+            try: conn.rollback()
+            except Exception: pass
+            return {"success": False, "message": f"Gift premium failed: {e}"}
+
 def distribute_reserves_equal(db_path: Path, amount_seconds: Optional[int] = None) -> Dict[str, Any]:
     """Distribute Time Reserves equally to all active users.
     If amount_seconds is None, use the full available reserves.
@@ -343,6 +617,7 @@ def top_accounts(db_path: Path, limit: int = 10) -> List[Dict[str, Any]]:
 def get_user_stats(db_path: Path, username: str) -> Optional[Dict[str, int]]:
     with connect(db_path) as conn:
         _ensure_stats(conn)
+        _ensure_premium(conn)
         r = conn.execute("SELECT energy, hunger, water FROM users WHERE username = ?", (username,)).fetchone()
         if not r:
             return None
@@ -364,6 +639,45 @@ def set_all_users_stats_full(db_path: Path) -> int:
         conn.commit()
         return int(cur.rowcount or 0)
 
+
+def apply_stat_changes(db_path: Path, username: str, delta_energy: int, delta_hunger: int, delta_water: int) -> Dict[str, Any]:
+    """Apply stat deltas to a user, capping each stat to [0,100].
+    Returns: {success, message, energy, hunger, water}
+    """
+    out: Dict[str, Any] = {"success": False, "message": ""}
+    with connect(db_path) as conn:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            _ensure_stats(conn)
+            _ensure_premium(conn)
+            u = conn.execute("SELECT id, energy, hunger, water, premium_until FROM users WHERE username = ?", (username,)).fetchone()
+            if not u:
+                conn.rollback(); out["message"] = "User not found"; return out
+            import time as _t
+            upper = 250 if int(u[4] or 0) > int(_t.time()) else 100
+            def cap(v: int) -> int:
+                return 0 if v < 0 else (upper if v > upper else v)
+            new_energy = cap(int(u[1]) + int(delta_energy))
+            new_hunger = cap(int(u[2]) + int(delta_hunger))
+            new_water  = cap(int(u[3]) + int(delta_water))
+            conn.execute(
+                "UPDATE users SET energy = ?, hunger = ?, water = ? WHERE id = ?",
+                (new_energy, new_hunger, new_water, int(u[0]))
+            )
+            conn.commit()
+            out.update({
+                "success": True,
+                "message": "Stats updated",
+                "energy": new_energy,
+                "hunger": new_hunger,
+                "water": new_water,
+            })
+            return out
+        except Exception as e:
+            try: conn.rollback()
+            except Exception: pass
+            out["message"] = f"Update failed: {e}"
+            return out
 
 def apply_stat_changes_and_charge(db_path: Path, username: str, delta_energy: int, delta_hunger: int, delta_water: int, cost_seconds: int) -> Dict[str, Any]:
     """Atomically deduct cost_seconds from user's balance and apply stat deltas capped to [0,100].
@@ -497,6 +811,87 @@ def get_market_index_percent(db_path: Path) -> int:
             return 0
 
 
+# ---- Time Earner promo config ----
+
+def _ensure_earner_config(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS time_earner_config (
+            id INTEGER PRIMARY KEY CHECK(id=1),
+            base_percent REAL,
+            per_block_percent REAL,
+            min_seconds INTEGER,
+            block_seconds INTEGER,
+            promo_enabled INTEGER,
+            default_bonus_percent REAL,
+            default_per_block_percent REAL
+        )
+        """
+    )
+    # migrations: add missing columns if upgrading
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(time_earner_config)").fetchall()}
+    if "base_percent" not in cols:
+        conn.execute("ALTER TABLE time_earner_config ADD COLUMN base_percent REAL")
+    if "per_block_percent" not in cols:
+        conn.execute("ALTER TABLE time_earner_config ADD COLUMN per_block_percent REAL")
+    if "min_seconds" not in cols:
+        conn.execute("ALTER TABLE time_earner_config ADD COLUMN min_seconds INTEGER")
+    if "block_seconds" not in cols:
+        conn.execute("ALTER TABLE time_earner_config ADD COLUMN block_seconds INTEGER")
+    if "promo_enabled" not in cols:
+        conn.execute("ALTER TABLE time_earner_config ADD COLUMN promo_enabled INTEGER")
+    if "default_bonus_percent" not in cols:
+        conn.execute("ALTER TABLE time_earner_config ADD COLUMN default_bonus_percent REAL")
+    if "default_per_block_percent" not in cols:
+        conn.execute("ALTER TABLE time_earner_config ADD COLUMN default_per_block_percent REAL")
+    # ensure row exists (id only), then set defaults where NULL
+    conn.execute("INSERT OR IGNORE INTO time_earner_config(id) VALUES (1)")
+    conn.execute("UPDATE time_earner_config SET base_percent = COALESCE(base_percent, 0.10) WHERE id = 1")
+    conn.execute("UPDATE time_earner_config SET per_block_percent = COALESCE(per_block_percent, 0.0125) WHERE id = 1")
+    conn.execute("UPDATE time_earner_config SET min_seconds = COALESCE(min_seconds, 600) WHERE id = 1")
+    conn.execute("UPDATE time_earner_config SET block_seconds = COALESCE(block_seconds, 600) WHERE id = 1")
+    conn.execute("UPDATE time_earner_config SET promo_enabled = COALESCE(promo_enabled, 1) WHERE id = 1")
+    conn.execute("UPDATE time_earner_config SET default_bonus_percent = COALESCE(default_bonus_percent, 0.10) WHERE id = 1")
+    conn.execute("UPDATE time_earner_config SET default_per_block_percent = COALESCE(default_per_block_percent, 0.00) WHERE id = 1")
+
+
+def get_earner_promo_config(db_path: Path) -> Dict[str, float | int]:
+    with connect(db_path) as conn:
+        _ensure_earner_config(conn)
+        row = conn.execute(
+            "SELECT base_percent, per_block_percent, min_seconds, block_seconds, promo_enabled, default_bonus_percent, default_per_block_percent FROM time_earner_config WHERE id = 1"
+        ).fetchone()
+        if not row:
+            return {"base_percent": 0.10, "per_block_percent": 0.0125, "min_seconds": 600, "block_seconds": 600, "promo_enabled": 1, "default_bonus_percent": 0.10, "default_per_block_percent": 0.00}
+        return {
+            "base_percent": float(row[0]),
+            "per_block_percent": float(row[1]),
+            "min_seconds": int(row[2]),
+            "block_seconds": int(row[3]),
+            "promo_enabled": int(row[4]),
+            "default_bonus_percent": float(row[5]),
+            "default_per_block_percent": float(row[6]) if row[6] is not None else 0.0,
+        }
+
+
+def set_earner_promo_config(db_path: Path, base_percent: float, per_block_percent: float, min_seconds: int, block_seconds: int, promo_enabled: int = 1, default_bonus_percent: float = 0.10, default_per_block_percent: float = 0.0) -> None:
+    b = float(base_percent)
+    p = float(per_block_percent)
+    mn = int(max(1, min_seconds))
+    bs = int(max(1, block_seconds))
+    en = 1 if int(promo_enabled) != 0 else 0
+    dbonus = float(default_bonus_percent)
+    dper = float(default_per_block_percent)
+    with connect(db_path) as conn:
+        _ensure_earner_config(conn)
+        conn.execute(
+            "INSERT INTO time_earner_config(id, base_percent, per_block_percent, min_seconds, block_seconds, promo_enabled, default_bonus_percent, default_per_block_percent) VALUES (1, ?, ?, ?, ?, ?, ?, ?)\n"
+            "ON CONFLICT(id) DO UPDATE SET base_percent=excluded.base_percent, per_block_percent=excluded.per_block_percent, min_seconds=excluded.min_seconds, block_seconds=excluded.block_seconds, promo_enabled=excluded.promo_enabled, default_bonus_percent=excluded.default_bonus_percent, default_per_block_percent=excluded.default_per_block_percent",
+            (b, p, mn, bs, en, dbonus, dper),
+        )
+        conn.commit()
+
+
 def upsert_store_item(db_path: Path, item: str, kind: str, qty: int, restore_energy: int, restore_hunger: int, restore_water: int, base_price_seconds: int, name: Optional[str] = None) -> None:
     now = int(time.time())
     with connect(db_path) as conn:
@@ -609,8 +1004,9 @@ def purchase_store_item(db_path: Path, username: str, item: str, quantity: int, 
             _ensure_store_prices(conn)
             _ensure_store_config(conn)
             _ensure_user_inventory(conn)
+            _ensure_premium(conn)
             # Load user
-            u = conn.execute("SELECT id, active, balance_seconds, energy, hunger, water FROM users WHERE username = ?", (username,)).fetchone()
+            u = conn.execute("SELECT id, active, balance_seconds, energy, hunger, water, premium_until FROM users WHERE username = ?", (username,)).fetchone()
             if not u:
                 result["message"] = "User not found"; conn.rollback(); return result
             if not int(u["active"]):
@@ -628,6 +1024,10 @@ def purchase_store_item(db_path: Path, username: str, item: str, quantity: int, 
             curr_price = int(r[4])
             idx_percent = int(conn.execute("SELECT market_index_percent FROM time_store_config WHERE id = 1").fetchone()[0])
             effective = max(1, int(round(curr_price * (1.0 + float(idx_percent)/100.0))))
+            # Premium discount 10%
+            import time as _t
+            if int(u["premium_until"] or 0) > int(_t.time()):
+                effective = max(1, int(round(effective * 0.9)))
             total_cost = effective * q
             bal = int(u["balance_seconds"])
             if bal < total_cost:
@@ -637,7 +1037,8 @@ def purchase_store_item(db_path: Path, username: str, item: str, quantity: int, 
             stored = False
             if apply_now:
                 # Apply stats
-                def cap(v: int) -> int: return 0 if v < 0 else (100 if v > 100 else v)
+                upper = 250 if int(u["premium_until"] or 0) > int(_t.time()) else 100
+                def cap(v: int) -> int: return 0 if v < 0 else (upper if v > upper else v)
                 new_energy = cap(int(u["energy"]) + int(r[1]) * q)
                 new_hunger = cap(int(u["hunger"]) + int(r[2]) * q)
                 new_water  = cap(int(u["water"])  + int(r[3]) * q)
@@ -672,6 +1073,60 @@ def purchase_store_item(db_path: Path, username: str, item: str, quantity: int, 
             try: conn.rollback()
             except Exception: pass
             return {"success": False, "message": f"Purchase failed: {e}"}
+
+
+# Premium helpers
+def is_premium(db_path: Path, username: str) -> Dict[str, Any]:
+    with connect(db_path) as conn:
+        _ensure_premium(conn)
+        row = conn.execute("SELECT premium_until FROM users WHERE username = ?", (username,)).fetchone()
+        if not row:
+            return {"active": False, "until": 0}
+        import time as _t
+        until = int(row[0] or 0)
+        return {"active": until > int(_t.time()), "until": until}
+
+
+def purchase_premium(db_path: Path, username: str, seconds: int) -> Dict[str, Any]:
+    """Purchase premium at 1:3 pricing. Min 3h if not currently premium; allow any positive extension if active.
+    Returns: {success, message, balance, premium_until, cost}
+    """
+    secs = int(seconds)
+    result: Dict[str, Any] = {"success": False, "message": ""}
+    if secs <= 0:
+        result["message"] = "Duration must be > 0"; return result
+    with connect(db_path) as conn:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            _ensure_premium(conn)
+            u = conn.execute("SELECT id, active, balance_seconds, premium_until FROM users WHERE username = ?", (username,)).fetchone()
+            if not u:
+                result["message"] = "User not found"; conn.rollback(); return result
+            if not int(u[1]):
+                result["message"] = "Account is deactivated"; conn.rollback(); return result
+            import time as _t
+            now = int(_t.time())
+            active = int(u[3] or 0) > now
+            if not active and secs < 10800:
+                result["message"] = "Minimum 3h for first purchase"; conn.rollback(); return result
+            cost = secs * 3
+            bal = int(u[2])
+            if bal < cost:
+                result["message"] = "Insufficient balance"; conn.rollback(); return result
+            # Deduct and extend
+            conn.execute("UPDATE users SET balance_seconds = balance_seconds - ? WHERE id = ?", (cost, int(u[0])))
+            base = int(u[3] or 0)
+            start = base if base > now else now
+            new_until = start + secs
+            conn.execute("UPDATE users SET premium_until = ? WHERE id = ?", (new_until, int(u[0])))
+            nb = conn.execute("SELECT balance_seconds FROM users WHERE id = ?", (int(u[0]),)).fetchone()[0]
+            conn.commit()
+            return {"success": True, "message": "Premium purchased", "balance": int(nb), "premium_until": int(new_until), "cost": int(cost)}
+        except Exception as e:
+            try: conn.rollback()
+            except Exception: pass
+            result["message"] = f"Premium purchase failed: {e}"
+            return result
 
 
 def purchase_store_item_by_id(db_path: Path, username: str, item_id: int, quantity: int, apply_now: bool = True) -> Dict[str, Any]:
@@ -717,10 +1172,11 @@ def use_inventory_item(db_path: Path, username: str, item: str, quantity: int) -
         try:
             conn.execute("BEGIN IMMEDIATE")
             _ensure_stats(conn)
+            _ensure_premium(conn)
             _ensure_user_inventory(conn)
             _ensure_store_catalog(conn)
             # Load user
-            u = conn.execute("SELECT id, energy, hunger, water FROM users WHERE username = ?", (username,)).fetchone()
+            u = conn.execute("SELECT id, energy, hunger, water, premium_until FROM users WHERE username = ?", (username,)).fetchone()
             if not u:
                 conn.rollback(); return {"success": False, "message": "User not found"}
             # Check inventory
@@ -731,7 +1187,9 @@ def use_inventory_item(db_path: Path, username: str, item: str, quantity: int) -
             eff = conn.execute("SELECT restore_energy, restore_hunger, restore_water FROM time_store_catalog WHERE item = ?", (item,)).fetchone()
             if not eff:
                 conn.rollback(); return {"success": False, "message": "Item not found"}
-            def cap(v: int) -> int: return 0 if v < 0 else (100 if v > 100 else v)
+            import time as _t
+            upper = 250 if int(u[4] or 0) > int(_t.time()) else 100
+            def cap(v: int) -> int: return 0 if v < 0 else (upper if v > upper else v)
             new_energy = cap(int(u[1]) + int(eff[0]) * q)
             new_hunger = cap(int(u[2]) + int(eff[1]) * q)
             new_water  = cap(int(u[3]) + int(eff[2]) * q)
@@ -746,6 +1204,115 @@ def use_inventory_item(db_path: Path, username: str, item: str, quantity: int) -
             try: conn.rollback()
             except Exception: pass
             return {"success": False, "message": f"Use failed: {e}"}
+
+
+def transfer_inventory_item(db_path: Path, from_username: str, to_username: str, item: str, quantity: int) -> Dict[str, Any]:
+    """Transfer quantity of item from one user's inventory to another's, atomically."""
+    q = int(max(1, quantity))
+    with connect(db_path) as conn:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            _ensure_user_inventory(conn)
+            # Load users
+            u_from = conn.execute("SELECT id, active FROM users WHERE username = ?", (from_username,)).fetchone()
+            u_to = conn.execute("SELECT id, active FROM users WHERE username = ?", (to_username,)).fetchone()
+            if not u_from:
+                conn.rollback(); return {"success": False, "message": "Sender not found"}
+            if not u_to:
+                conn.rollback(); return {"success": False, "message": "Recipient not found"}
+            if not int(u_from[1]):
+                conn.rollback(); return {"success": False, "message": "Sender account is deactivated"}
+            if not int(u_to[1]):
+                conn.rollback(); return {"success": False, "message": "Recipient account is deactivated"}
+            # Check sender inventory
+            row = conn.execute("SELECT qty FROM user_inventory WHERE user_id = ? AND item = ?", (int(u_from[0]), item)).fetchone()
+            if not row or int(row[0]) < q:
+                conn.rollback(); return {"success": False, "message": "Not enough in inventory"}
+            # Move
+            conn.execute("UPDATE user_inventory SET qty = qty - ? WHERE user_id = ? AND item = ?", (q, int(u_from[0]), item))
+            conn.execute(
+                "INSERT INTO user_inventory(user_id, item, qty) VALUES(?,?,?)\n"
+                "ON CONFLICT(user_id, item) DO UPDATE SET qty = qty + excluded.qty",
+                (int(u_to[0]), item, q)
+            )
+            # Clean zero rows for sender
+            conn.execute("DELETE FROM user_inventory WHERE user_id = ? AND item = ? AND qty <= 0", (int(u_from[0]), item))
+            # Read post
+            post_from = conn.execute("SELECT qty FROM user_inventory WHERE user_id = ? AND item = ?", (int(u_from[0]), item)).fetchone()
+            post_to = conn.execute("SELECT qty FROM user_inventory WHERE user_id = ? AND item = ?", (int(u_to[0]), item)).fetchone()
+            conn.commit()
+            return {
+                "success": True,
+                "message": "Transfer completed",
+                "sender_qty": int(post_from[0]) if post_from else 0,
+                "recipient_qty": int(post_to[0]) if post_to else q,
+            }
+        except Exception as e:
+            try: conn.rollback()
+            except Exception: pass
+            return {"success": False, "message": f"Transfer failed: {e}"}
+
+
+def sell_inventory_item(db_path: Path, username: str, item: str, quantity: int) -> Dict[str, Any]:
+    """Sell quantity of an inventory item back to the system at a percentage of the effective price.
+    Non-premium: 75% of effective price. Premium: 85% of effective price.
+    """
+    q = int(max(1, quantity))
+    with connect(db_path) as conn:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            _ensure_user_inventory(conn)
+            _ensure_store_catalog(conn)
+            _ensure_store_prices(conn)
+            _ensure_premium(conn)
+            # Load user
+            u = conn.execute("SELECT id, active, balance_seconds, premium_until FROM users WHERE username = ?", (username,)).fetchone()
+            if not u:
+                conn.rollback(); return {"success": False, "message": "User not found"}
+            if not int(u[1]):
+                conn.rollback(); return {"success": False, "message": "Account is deactivated"}
+            # Check inventory
+            row = conn.execute("SELECT qty FROM user_inventory WHERE user_id = ? AND item = ?", (int(u[0]), item)).fetchone()
+            if not row or int(row[0]) < q:
+                conn.rollback(); return {"success": False, "message": "Not enough in inventory"}
+            # Determine effective price
+            r = conn.execute(
+                "SELECT p.current_price_seconds FROM time_store_prices p WHERE p.item = ?",
+                (item,)
+            ).fetchone()
+            if not r:
+                conn.rollback(); return {"success": False, "message": "Item price not found"}
+            curr_price = int(r[0])
+            idx_percent = int(conn.execute("SELECT market_index_percent FROM time_store_config WHERE id = 1").fetchone()[0])
+            effective = max(1, int(round(curr_price * (1.0 + float(idx_percent)/100.0))))
+            # Premium rate
+            import time as _t
+            is_prem = int(u[3] or 0) > int(_t.time())
+            rate = 0.85 if is_prem else 0.75
+            unit_payout = max(1, int(round(effective * rate)))
+            total_payout = unit_payout * q
+            # Apply changes
+            conn.execute("UPDATE users SET balance_seconds = balance_seconds + ? WHERE id = ?", (int(total_payout), int(u[0])))
+            conn.execute("UPDATE user_inventory SET qty = qty - ? WHERE user_id = ? AND item = ?", (q, int(u[0]), item))
+            conn.execute("DELETE FROM user_inventory WHERE user_id = ? AND item = ? AND qty <= 0", (int(u[0]), item))
+            post_bal = conn.execute("SELECT balance_seconds FROM users WHERE id = ?", (int(u[0]),)).fetchone()
+            post_qty = conn.execute("SELECT qty FROM user_inventory WHERE user_id = ? AND item = ?", (int(u[0]), item)).fetchone()
+            conn.commit()
+            return {
+                "success": True,
+                "message": "Sold item(s)",
+                "balance": int(post_bal[0]) if post_bal else None,
+                "unit_effective_price_seconds": int(effective),
+                "unit_payout_seconds": int(unit_payout),
+                "total_payout_seconds": int(total_payout),
+                "remaining_qty": int(post_qty[0]) if post_qty else 0,
+                "premium": bool(is_prem),
+                "rate_percent": int(rate * 100),
+            }
+        except Exception as e:
+            try: conn.rollback()
+            except Exception: pass
+            return {"success": False, "message": f"Sell failed: {e}"}
 
 
 def transfer_seconds(db_path: Path, from_username: str, to_username: str, amount_seconds: int) -> Dict[str, Any]:

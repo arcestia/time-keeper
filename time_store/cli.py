@@ -30,12 +30,30 @@ def _require_admin_login(db_path: Path, username: str) -> None:
         raise SystemExit("Authentication failed")
 
 
-def cmd_list(db_path: Path) -> None:
+def _premium_info(db_path: Path, username: Optional[str]) -> tuple[bool, int]:
+    if not username:
+        return (False, 0)
+    try:
+        p = tkdb.is_premium(db_path, username)
+        import time as _t
+        active = bool(p.get("active")) and int(p.get("until", 0)) > int(_t.time())
+        rem = 0
+        if active:
+            rem = max(0, int(p.get("until", 0)) - int(_t.time()))
+        return (active, rem)
+    except Exception:
+        return (False, 0)
+
+
+def cmd_list(db_path: Path, username: Optional[str] = None) -> None:
     items = tkdb.list_store_items(db_path)
     if not items:
         print(Fore.YELLOW + "No items in the store yet. Ask admin to add some.")
         return
+    prem_active, _ = _premium_info(db_path, username)
     headers = ["ID", "Key", "Name", "Kind", "Qty", "Restores", "Price (eff)"]
+    if prem_active:
+        headers.append("Your price (-10%)")
     rows = []
     idx = tkdb.get_market_index_percent(db_path)
     for it in items:
@@ -47,7 +65,7 @@ def cmd_list(db_path: Path) -> None:
         if it["restore_water"]:
             restores.append(f"W+{it['restore_water']}")
         restores_s = ", ".join(restores) if restores else "-"
-        rows.append([
+        row = [
             str(it.get("id") or "-"),
             it["item"],
             it.get("name") or "-",
@@ -55,7 +73,11 @@ def cmd_list(db_path: Path) -> None:
             str(it["qty"]),
             restores_s,
             formatting.format_duration(it["effective_price_seconds"], style="short") + f"  (idx {idx}%)",
-        ])
+        ]
+        if prem_active:
+            your = max(1, int(round(int(it["effective_price_seconds"]) * 0.9)))
+            row.append(formatting.format_duration(your, style="short"))
+        rows.append(row)
     _print_table(headers, rows)
 
 
@@ -75,24 +97,31 @@ def cmd_buy(db_path: Path, username: str, item: str, qty: int, apply_now: bool =
         )
 
 
-def cmd_prices(db_path: Path) -> None:
+def cmd_prices(db_path: Path, username: Optional[str] = None) -> None:
     idx = tkdb.get_market_index_percent(db_path)
     prices = tkdb.get_store_prices(db_path)
     if not prices:
         print(Fore.YELLOW + "No price data yet. Seed items first.")
         return
     # We don't have names in the prices table; join comes in list view.
+    prem_active, _ = _premium_info(db_path, username)
     headers = ["Item", "Base", "Current", "Effective", "Index"]
+    if prem_active:
+        headers.append("Your price (-10%)")
     rows = []
     for p in prices:
         effective = max(1, int(round(p["current_price_seconds"] * (1.0 + float(idx)/100.0))))
-        rows.append([
+        row = [
             p["item"],
             formatting.format_duration(p["base_price_seconds"], style="short"),
             formatting.format_duration(p["current_price_seconds"], style="short"),
             formatting.format_duration(effective, style="short"),
             f"{idx}%",
-        ])
+        ]
+        if prem_active:
+            your = max(1, int(round(effective * 0.9)))
+            row.append(formatting.format_duration(your, style="short"))
+        rows.append(row)
     _print_table(headers, rows)
 
 
@@ -165,6 +194,42 @@ def cmd_inventory_use(db_path: Path, username: str, item_or_id: str, qty: int) -
         raise SystemExit(res.get("message", "Use failed"))
     print(Fore.GREEN + "Used item.")
     print(f"Stats -> Energy {res['energy']}%  Hunger {res['hunger']}%  Water {res['water']}%")
+
+
+def cmd_inventory_send(db_path: Path, from_username: str, to_username: str, item_or_id: str, qty: int) -> None:
+    _require_user_login(db_path, from_username)
+    key = item_or_id
+    if item_or_id.isdigit():
+        for it in tkdb.list_store_items(db_path):
+            if it.get("id") == int(item_or_id):
+                key = it["item"]
+                break
+    res = tkdb.transfer_inventory_item(db_path, from_username, to_username, key, qty)
+    if not res.get("success"):
+        raise SystemExit(res.get("message", "Transfer failed"))
+    print(Fore.GREEN + "Transfer completed.")
+    print(f"Sender now has: {res.get('sender_qty', 0)}  |  Recipient now has: {res.get('recipient_qty', 0)}")
+
+
+def cmd_inventory_sell(db_path: Path, username: str, item_or_id: str, qty: int) -> None:
+    _require_user_login(db_path, username)
+    key = item_or_id
+    if item_or_id.isdigit():
+        for it in tkdb.list_store_items(db_path):
+            if it.get("id") == int(item_or_id):
+                key = it["item"]
+                break
+    res = tkdb.sell_inventory_item(db_path, username, key, qty)
+    if not res.get("success"):
+        raise SystemExit(res.get("message", "Sell failed"))
+    print(Fore.GREEN + "Sold item(s).")
+    print(
+        "Unit effective: " + formatting.format_duration(int(res['unit_effective_price_seconds']), style='short') +
+        f"  | Payout rate: {int(res['rate_percent'])}%" +
+        "  | Unit payout: " + formatting.format_duration(int(res['unit_payout_seconds']), style='short') +
+        "  | Total payout: " + formatting.format_duration(int(res['total_payout_seconds']), style='short')
+    )
+    print("Balance: " + formatting.format_duration(int(res['balance']), style='short') + f"  | Remaining qty: {int(res['remaining_qty'])}")
 
 
 def _print_table(headers, rows):
@@ -262,7 +327,9 @@ def interactive_menu(db_path: Path) -> None:
         else:
             uname = current_user.get("username")
             is_admin = bool(current_user.get("is_admin"))
-            print(Fore.CYAN + Style.BRIGHT + f"Logged in as: {uname} ({'admin' if is_admin else 'user'})")
+            prem_active, prem_rem = _premium_info(db_path, uname)
+            prem_line = f" | Premium: active ({formatting.format_duration(prem_rem, style='short')})" if prem_active else " | Premium: inactive"
+            print(Fore.CYAN + Style.BRIGHT + f"Logged in as: {uname} ({'admin' if is_admin else 'user'}){prem_line}")
             if is_admin:
                 print(f"{Fore.YELLOW}1){Style.RESET_ALL} List items")
                 print(f"{Fore.YELLOW}2){Style.RESET_ALL} Show prices")
@@ -273,7 +340,9 @@ def interactive_menu(db_path: Path) -> None:
                 print(f"{Fore.YELLOW}7){Style.RESET_ALL} Buy item")
                 print(f"{Fore.YELLOW}8){Style.RESET_ALL} Inventory")
                 print(f"{Fore.YELLOW}9){Style.RESET_ALL} Use inventory item")
-                print(f"{Fore.YELLOW}10){Style.RESET_ALL} Logout")
+                print(f"{Fore.YELLOW}10){Style.RESET_ALL} Send inventory item")
+                print(f"{Fore.YELLOW}11){Style.RESET_ALL} Sell inventory item")
+                print(f"{Fore.YELLOW}12){Style.RESET_ALL} Logout")
                 print(f"{Fore.YELLOW}0){Style.RESET_ALL} Quit")
             else:
                 print(f"{Fore.YELLOW}1){Style.RESET_ALL} List items")
@@ -281,7 +350,9 @@ def interactive_menu(db_path: Path) -> None:
                 print(f"{Fore.YELLOW}3){Style.RESET_ALL} Buy item")
                 print(f"{Fore.YELLOW}4){Style.RESET_ALL} Inventory")
                 print(f"{Fore.YELLOW}5){Style.RESET_ALL} Use inventory item")
-                print(f"{Fore.YELLOW}6){Style.RESET_ALL} Logout")
+                print(f"{Fore.YELLOW}6){Style.RESET_ALL} Send inventory item")
+                print(f"{Fore.YELLOW}7){Style.RESET_ALL} Sell inventory item")
+                print(f"{Fore.YELLOW}8){Style.RESET_ALL} Logout")
                 print(f"{Fore.YELLOW}0){Style.RESET_ALL} Quit")
             choice = input("Choose: ").strip()
             if choice == "0":
@@ -289,9 +360,9 @@ def interactive_menu(db_path: Path) -> None:
                 return
             if is_admin:
                 if choice == "1":
-                    cmd_list(db_path)
+                    cmd_list(db_path, username=uname)
                 elif choice == "2":
-                    cmd_prices(db_path)
+                    cmd_prices(db_path, username=uname)
                 elif choice == "3":
                     vol = float(_input_with_default("Volatility", "0.2"))
                     cmd_refresh_prices(db_path, vol)
@@ -353,6 +424,21 @@ def interactive_menu(db_path: Path) -> None:
                     except SystemExit as e:
                         print(Fore.RED + str(e))
                 elif choice == "10":
+                    it = input("Inventory item to send (ID or key): ").strip()
+                    qty = _input_int_with_default("Qty", 1)
+                    to_user = input("Send to username: ").strip()
+                    try:
+                        cmd_inventory_send(db_path, uname, to_user, it, qty)
+                    except SystemExit as e:
+                        print(Fore.RED + str(e))
+                elif choice == "11":
+                    it = input("Inventory item to sell (ID or key): ").strip()
+                    qty = _input_int_with_default("Qty", 1)
+                    try:
+                        cmd_inventory_sell(db_path, uname, it, qty)
+                    except SystemExit as e:
+                        print(Fore.RED + str(e))
+                elif choice == "12":
                     current_user = None
                     print(Fore.YELLOW + "Logged out.")
                 else:
@@ -394,6 +480,21 @@ def interactive_menu(db_path: Path) -> None:
                     except SystemExit as e:
                         print(Fore.RED + str(e))
                 elif choice == "6":
+                    it = input("Inventory item to send (ID or key): ").strip()
+                    qty = _input_int_with_default("Qty", 1)
+                    to_user = input("Send to username: ").strip()
+                    try:
+                        cmd_inventory_send(db_path, uname, to_user, it, qty)
+                    except SystemExit as e:
+                        print(Fore.RED + str(e))
+                elif choice == "7":
+                    it = input("Inventory item to sell (ID or key): ").strip()
+                    qty = _input_int_with_default("Qty", 1)
+                    try:
+                        cmd_inventory_sell(db_path, uname, it, qty)
+                    except SystemExit as e:
+                        print(Fore.RED + str(e))
+                elif choice == "8":
                     current_user = None
                     print(Fore.YELLOW + "Logged out.")
                 else:
@@ -451,6 +552,23 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
     p_inter = sub.add_parser("interactive", help="Run interactive menu")
     p_inter.add_argument("--db", help="SQLite database file path")
 
+    p_inv_send = sub.add_parser("inventory-send", help="Send inventory item to another user")
+    p_inv_send.add_argument("--from-username", required=True, dest="from_username")
+    p_inv_send.add_argument("--to-username", required=True, dest="to_username")
+    grp2 = p_inv_send.add_mutually_exclusive_group(required=True)
+    grp2.add_argument("--item", help="Item key")
+    grp2.add_argument("--item-id", type=int, dest="item_id", help="Numeric item ID")
+    p_inv_send.add_argument("--qty", type=int, default=1)
+    p_inv_send.add_argument("--db", help="SQLite database file path")
+
+    p_inv_sell = sub.add_parser("inventory-sell", help="Sell inventory item for balance")
+    p_inv_sell.add_argument("--username", required=True)
+    grp3 = p_inv_sell.add_mutually_exclusive_group(required=True)
+    grp3.add_argument("--item", help="Item key")
+    grp3.add_argument("--item-id", type=int, dest="item_id", help="Numeric item ID")
+    p_inv_sell.add_argument("--qty", type=int, default=1)
+    p_inv_sell.add_argument("--db", help="SQLite database file path")
+
     return p.parse_args(argv)
 
 
@@ -486,6 +604,27 @@ def main(argv: Optional[list] = None) -> None:
         cmd_inventory_use(db_path, ns.username, ns.item, ns.qty)
     elif ns.cmd == "prices":
         cmd_prices(db_path)
+    elif ns.cmd == "inventory-send":
+        item_key = ns.item
+        if getattr(ns, "item_id", None) is not None:
+            # Resolve id to key
+            for it in tkdb.list_store_items(db_path):
+                if it.get("id") == int(ns.item_id):
+                    item_key = it["item"]
+                    break
+        if not item_key:
+            raise SystemExit("Item not found")
+        cmd_inventory_send(db_path, ns.from_username, ns.to_username, item_key, ns.qty)
+    elif ns.cmd == "inventory-sell":
+        item_key = ns.item
+        if getattr(ns, "item_id", None) is not None:
+            for it in tkdb.list_store_items(db_path):
+                if it.get("id") == int(ns.item_id):
+                    item_key = it["item"]
+                    break
+        if not item_key:
+            raise SystemExit("Item not found")
+        cmd_inventory_sell(db_path, ns.username, item_key, ns.qty)
     elif ns.cmd == "refresh-prices":
         cmd_refresh_prices(db_path, ns.volatility)
     elif ns.cmd == "set-index":

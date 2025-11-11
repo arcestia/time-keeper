@@ -1,5 +1,4 @@
 # Changelog
-
 All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning 2.0.0.
@@ -22,12 +21,39 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
  - New CLI app `time_earner`: users can login and earn time to their balance (interactive and non-interactive modes).
  - Time Reserves: deducted seconds are accumulated in a pool; admins can view reserves via CLI and interactive.
  - time_earner interactive: earning is a timed session that stakes the chosen amount, counts down, forfeits on early exit, and pays double on successful completion.
+  - Staking session now enforces a minimum duration of 2 hours.
  - Docs: Added `summary.md` (project summary) and `LOGIC_DESIGN.md` (replication-focused logic design).
 - Added `bulk-create` CLI subcommand to create many accounts for simulations with options for `--count`, `--prefix`, `--start-index`, `--initial` (human‑readable), `--passcode`, and `--admin-frequency`.
 - Admin: Added statistics view in interactive menu and `admin --stats` to show totals and top accounts.
 - Admin: Time Reserves operations — transfer from reserves to a user (`admin --reserves-transfer-to/--reserves-transfer-amount`) and distribute reserves equally across active users (`admin --reserves-distribute [--reserves-distribute-amount]`). Interactive admin menu includes both actions.
 - Tools Dashboard: Users can view personal stats (energy, hunger, water) from the interactive menu.
 - Admin: Stats controls — set a single user's stats to 100% or all users' stats to 100% via CLI flags (`admin --set-stats-full <username>`, `admin --set-stats-full-all`) and interactive admin menu.
+- Time Earner: Added open earning sessions (no stake, +30% reward) with minimum 1h duration and claim-anytime behavior.
+  - CLI: `time_earner.cli open-session --username <user>` runs until Ctrl+C to claim.
+  - Interactive: "Start open earning (no stake, +30%, min 1h)" option.
+  - Bugfix: Open session no longer auto-stops; it now asks for confirmation on Ctrl+C and only claims after confirmation.
+  - Output now shows bonus percentage in claims (e.g., "+6.5%").
+  - Premium integration: header shows Premium status with remaining time; +10% bonus on claim when Premium active at claim time.
+  - Open session behavior: if any stat reaches 0%, the session stops immediately and grants a penalized reward (−25% of what would have been added at that moment). Premium +10% bonus still applies after the penalty if Premium is active.
+  - Promo config (admin): base percent, per-block percent, min seconds, block seconds; enable/disable promo and set default bonus when disabled. Interactive admin option and `set-promo` subcommand added.
+  - Migration: added `time_earner_config` with safe column migrations for `promo_enabled` and `default_bonus_percent`.
+  - Split configs: separate promo vs default configs with dedicated tables. New `set-default` subcommand and interactive admin option. `open-session` uses Default config when Promo is disabled.
+  - UI: Promo status line displayed under the interactive header for logged-in users.
+  - UI: Simplified promo status display to "Promo: ongoing/disabled" and removed promo details from the open earning menu label.
+  - Staking config (admin): configurable minimum stake duration and reward multiplier for option 1.
+    - CLI: `time_earner.cli set-stake-config --admin <user> --min-seconds <n> --multiplier <x>`.
+    - Interactive: "Set stake config (admin)" option.
+    - UI: Option 1 shows brief stake info (e.g., "min 2h, x2 reward").
+  - Users can view stake tiers from the interactive menu ("View stake tiers"). Falls back to single-rule display when no tiers are defined.
+  - Earning sessions now deplete user stats every 10 minutes (default rates): Energy 0.75%, Hunger 0.5%, Water 1.0%. Future update will make these rates configurable.
+  - Open earning session now displays live stats (Energy/Hunger/Water) alongside elapsed time.
+  - Stake earning session now displays live stats (Energy/Hunger/Water) alongside the countdown.
+  - Sessions warn once at 50% (notice) and 20% (warning) thresholds for each stat.
+  - If any stat reaches 0%: stake session ends and forfeits the stake; open session ends with 0 reward.
+  - Premium status:
+    - Pricing: 1:3 (1 hour premium costs 3 hours balance). Minimum 3h if not already premium; can extend with any positive duration while active.
+    - Benefits: stat caps increase to 250% (Energy/Hunger/Water), 10% Time Store discount, and +10% bonus on all earning claims (stake and open).
+    - Interactive: "Buy Premium" option added in Time Keeper menu; header shows Premium status and remaining time.
 - New app `time_store`:
   - CLI to list items with qty and effective prices, buy items to restore stats (energy/hunger/water), and manage store as admin.
   - Market index supported in range -50%..+300% (default 0%). Effective price = current_price * (1 + index%).
@@ -40,6 +66,19 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
     - Interactive buy prompts: "Apply now? (Y/n)".
     - New commands: `inventory-list`, `inventory-use` (accept key or ID).
     - Interactive menu: Inventory viewing and using items.
+    - New: Users can send inventory items to other users.
+      - Interactive: "Send inventory item" option (admin and user menus).
+      - CLI: `inventory-send --from-username <user> --to-username <user> (--item <key> | --item-id <id>) --qty <n>`.
+    - New: Users can sell inventory items for balance.
+      - Payout: 75% of current effective price; 85% for Premium users.
+      - Interactive: "Sell inventory item" option.
+      - CLI: `inventory-sell --username <user> (--item <key> | --item-id <id>) --qty <n>`.
+
+- Time Keeper Premium:
+  - Interactive: Added "Gift Premium to user" option for both admin and regular users.
+    - Giver pays at 1:3 pricing; recipient receives Premium time.
+    - Minimum 3h applies if the recipient is not currently premium; extensions can be any positive duration when recipient is already premium.
+    - UI shows recipient's new remaining Premium time and giver's updated balance after gifting.
 
 ## [0.1.0] - 2025-11-10
 - Initial pre-release planning.
