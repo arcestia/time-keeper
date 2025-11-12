@@ -280,6 +280,78 @@ def start_earn_session(db_path: Path, username: str, stake_seconds: int) -> dict
     return {"success": True, "message": "Session complete", "balance": int(bal), "reward": reward, "premium_applied": premium_applied, "premium_extra": int(premium_extra), "base_reward": int(base_reward)}
 
 
+def start_earn_session_to_progress(db_path: Path, username: str, stake_seconds: int) -> dict:
+    """Stake countdown; on success add reward to premium lifetime progression (not balance)."""
+    stake = int(stake_seconds)
+    if stake <= 0:
+        return {"success": False, "message": "Amount must be greater than zero"}
+    # Reuse stake config/min checks
+    cfg = db.get_earner_stake_config(db_path)
+    reward_mult = float(cfg.get("reward_multiplier", 2.0))
+    tiers = db.list_earner_stake_tiers(db_path)
+    if tiers:
+        min_stake = int(tiers[0]["min_seconds"])
+        if stake < min_stake:
+            human_min = formatting.format_duration(min_stake, style='short')
+            return {"success": False, "message": f"Minimum stake duration is {human_min}"}
+        tier_mult = db.get_multiplier_for_stake(db_path, stake)
+        if tier_mult is not None:
+            reward_mult = float(tier_mult)
+    else:
+        min_stake = int(cfg.get("min_stake_seconds", 7200))
+        if stake < min_stake:
+            human_min = formatting.format_duration(min_stake, style='short')
+            return {"success": False, "message": f"Minimum stake duration is {human_min}"}
+    # Deduct stake from balance as usual
+    with db.connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT balance_seconds, active FROM users WHERE username = ?", (username,)).fetchone()
+        if not row:
+            conn.rollback(); return {"success": False, "message": "User not found"}
+        bal, active = int(row[0]), int(row[1])
+        if active != 1:
+            conn.rollback(); return {"success": False, "message": "Account is deactivated"}
+        if bal < stake:
+            conn.rollback(); return {"success": False, "message": "Insufficient balance"}
+        conn.execute("UPDATE users SET balance_seconds = balance_seconds - ? WHERE username = ?", (stake, username))
+        conn.commit()
+    # Countdown (simplified; no duplicate logic for warnings vs original)
+    remaining = stake
+    print(Fore.YELLOW + f"Session to progression started. Staked {formatting.format_duration(stake, style='short')}.")
+    print(Fore.YELLOW + "Do not exit. If you exit early, you lose the stake.")
+    try:
+        last_print = -1
+        while remaining > 0:
+            if remaining != last_print:
+                sys.stdout.write("\r" + f"Remaining: {formatting.format_duration(remaining, style='short', max_parts=2)}    ")
+                sys.stdout.flush()
+                last_print = remaining
+            time.sleep(1)
+            remaining -= 1
+        sys.stdout.write("\r" + "Remaining: 0s" + " " * 20 + "\n")
+    except KeyboardInterrupt:
+        print("")
+        print(Fore.RED + "Session interrupted. Stake forfeited.")
+        bal = db.get_balance_seconds(db_path, username) or 0
+        return {"success": False, "message": "Forfeited", "balance": int(bal)}
+    # Reward calculation with premium bonus
+    base_reward = int(round(stake * reward_mult))
+    premium_applied = False
+    premium_extra = 0
+    prem = db.is_premium(db_path, username)
+    import time as _t
+    if bool(prem.get("active")):
+        tier = db.get_user_premium_tier(db_path, username)
+        bonus_pct = float(tier.get("earn_bonus_percent", 0.10))
+        premium_applied = True
+        premium_extra = int(round(base_reward * bonus_pct))
+    reward = int(base_reward + premium_extra)
+    # Apply to premium progression
+    res = db.add_premium_lifetime_progress(db_path, username, reward)
+    if not res.get("success"):
+        return {"success": False, "message": res.get("message", "Failed to add progression")}
+    return {"success": True, "message": "Session complete (progression)", "added_progress": int(reward), "premium_applied": premium_applied, "premium_extra": int(premium_extra), "base_reward": int(base_reward), "current_tier": int(res.get("current_tier", 0)), "lifetime_seconds": int(res.get("lifetime_seconds", 0))}
+
 def start_open_earn_session(db_path: Path, username: str) -> dict:
     """Run a foreground open earning session (no stake), using promo config from DB.
     Returns dict with success, message, balance, reward, elapsed, bonus, rate.
@@ -501,6 +573,200 @@ def start_open_earn_session(db_path: Path, username: str) -> dict:
     return {"success": True, "message": "Open session claimed", "balance": int(bal), "reward": total_add, "elapsed": elapsed, "bonus": bonus, "rate": rate, "premium_applied": premium_applied, "premium_extra": int(premium_extra), "base_reward": int(total_add_base)}
 
 
+def start_open_earn_session_to_progress(db_path: Path, username: str) -> dict:
+    """Open earning; on claim add reward to premium lifetime progression (not balance)."""
+    promo_cfg = db.get_earner_promo_config(db_path)
+    default_cfg = db.get_earner_default_config(db_path)
+    promo_enabled = int(promo_cfg.get("promo_enabled", 1))
+    if promo_enabled:
+        base = float(promo_cfg.get("base_percent", 0.10))
+        per_block = float(promo_cfg.get("per_block_percent", 0.0125))
+        min_seconds = int(promo_cfg.get("min_seconds", 600))
+        block_seconds = int(promo_cfg.get("block_seconds", 600))
+    else:
+        base = float(default_cfg.get("base_percent", 0.10))
+        per_block = float(default_cfg.get("per_block_percent", 0.0125))
+        min_seconds = int(default_cfg.get("min_seconds", 600))
+        block_seconds = int(default_cfg.get("block_seconds", 600))
+    print(Fore.YELLOW + "Open session to progression started (no minimum). Press Ctrl+C to claim anytime.")
+    start_ts = int(time.time())
+    last_print = -1
+    next_deplete_at = start_ts + 600
+    deplete_tick = 0
+    warned_energy = 0
+    warned_hunger = 0
+    warned_water = 0
+    while True:
+        try:
+            elapsed = int(time.time()) - start_ts
+            if elapsed != last_print:
+                try:
+                    stats = db.get_user_stats(db_path, username) or {"energy": 100, "hunger": 100, "water": 100}
+                    stat_line = f" | Energy {int(stats['energy'])}%  Hunger {int(stats['hunger'])}%  Water {int(stats['water'])}%"
+                except Exception:
+                    stat_line = ""
+                try:
+                    bal_live = int(db.get_balance_seconds(db_path, username) or 0)
+                    bal_line = f" | Balance {formatting.format_duration(bal_live, style='short', max_parts=2)}"
+                except Exception:
+                    bal_line = ""
+                try:
+                    prem_active, prem_rem = _premium_info(db_path, username)
+                    prem_line = f" | Premium {formatting.format_duration(prem_rem, style='short')}" if prem_active else ""
+                except Exception:
+                    prem_line = ""
+                sys.stdout.write("\r" + f"Elapsed: {formatting.format_duration(elapsed, style='short', max_parts=2)}{stat_line}{bal_line}{prem_line}    ")
+                sys.stdout.flush()
+                last_print = elapsed
+            # Stop if balance reached 0: apply 25% penalty and add to progression
+            try:
+                bal_now = int(db.get_balance_seconds(db_path, username) or 0)
+                if bal_now <= 0:
+                    stop_ts = int(time.time())
+                    print("\n" + Fore.RED + Style.BRIGHT + "Balance reached 0. Session stopped (25% penalty applied).")
+                    elapsed_stop = stop_ts - start_ts
+                    blocks_stop = max(0, elapsed_stop // block_seconds)
+                    rate_stop = float(base + per_block * max(0, blocks_stop - 1))
+                    bonus_stop = int(round(elapsed_stop * rate_stop))
+                    total_base = int(elapsed_stop + bonus_stop)
+                    penalized = int(round(total_base * 0.75))
+                    prem = db.is_premium(db_path, username)
+                    import time as _t
+                    if bool(prem.get("active")):
+                        tier = db.get_user_premium_tier(db_path, username)
+                        bonus_pct = float(tier.get("earn_bonus_percent", 0.10))
+                        premium_applied = True
+                        premium_extra = int(round(penalized * bonus_pct))
+                    else:
+                        premium_applied = False
+                        premium_extra = 0
+                    final_add = int(penalized + premium_extra)
+                    resp = db.add_premium_lifetime_progress(db_path, username, final_add)
+                    if not resp.get("success"):
+                        return {"success": False, "message": resp.get("message", "Failed to add progression")}
+                    return {
+                        "success": True,
+                        "message": "Session ended (balance reached 0, penalty applied)",
+                        "added_progress": int(final_add),
+                        "elapsed": int(elapsed_stop),
+                        "bonus": int(bonus_stop),
+                        "rate": rate_stop,
+                        "penalty_applied": True,
+                        "penalty_percent": 25,
+                        "penalty_loss": int(max(0, total_base - penalized)),
+                        "premium_applied": premium_applied,
+                        "premium_extra": int(premium_extra),
+                        "base_reward": int(total_base),
+                        "current_tier": int(resp.get("current_tier", 0)),
+                        "lifetime_seconds": int(resp.get("lifetime_seconds", 0)),
+                    }
+            except Exception:
+                pass
+            # Apply depletion every 10 minutes and stop with penalty on stat==0
+            now = int(time.time())
+            if now >= next_deplete_at:
+                while next_deplete_at <= now:
+                    deplete_tick += 1
+                    e_drop = -1 if (deplete_tick % 4) in (1, 2, 3) else 0
+                    h_drop = -1 if (deplete_tick % 2) == 1 else 0
+                    w_drop = -1
+                    try:
+                        db.apply_stat_changes(db_path, username, e_drop, h_drop, w_drop)
+                    except Exception:
+                        pass
+                    try:
+                        stats2 = db.get_user_stats(db_path, username) or {"energy": 100, "hunger": 100, "water": 100}
+                        e, h, w = int(stats2["energy"]), int(stats2["hunger"]), int(stats2["water"])
+                        if e <= 20 and warned_energy < 20:
+                            print("\n" + Fore.RED + Style.BRIGHT + "Warning: Energy is at 20% or lower!")
+                            warned_energy = 20
+                        elif e <= 50 and warned_energy < 50:
+                            print("\n" + Fore.YELLOW + "Notice: Energy is at 50% or lower.")
+                            warned_energy = 50
+                        if h <= 20 and warned_hunger < 20:
+                            print("\n" + Fore.RED + Style.BRIGHT + "Warning: Hunger is at 20% or lower!")
+                            warned_hunger = 20
+                        elif h <= 50 and warned_hunger < 50:
+                            print("\n" + Fore.YELLOW + "Notice: Hunger is at 50% or lower.")
+                            warned_hunger = 50
+                        if w <= 20 and warned_water < 20:
+                            print("\n" + Fore.RED + Style.BRIGHT + "Warning: Water is at 20% or lower!")
+                            warned_water = 20
+                        elif w <= 50 and warned_water < 50:
+                            print("\n" + Fore.YELLOW + "Notice: Water is at 50% or lower.")
+                            warned_water = 50
+                        if e <= 0 or h <= 0 or w <= 0:
+                            stop_ts = int(time.time())
+                            print("\n" + Fore.RED + Style.BRIGHT + "A stat reached 0%. Session stopped (25% penalty applied).")
+                            elapsed_stop = stop_ts - start_ts
+                            blocks_stop = max(0, elapsed_stop // block_seconds)
+                            rate_stop = float(base + per_block * max(0, blocks_stop - 1))
+                            bonus_stop = int(round(elapsed_stop * rate_stop))
+                            total_base = int(elapsed_stop + bonus_stop)
+                            penalized = int(round(total_base * 0.75))
+                            prem = db.is_premium(db_path, username)
+                            import time as _t
+                            if bool(prem.get("active")):
+                                tier = db.get_user_premium_tier(db_path, username)
+                                bonus_pct = float(tier.get("earn_bonus_percent", 0.10))
+                                premium_applied = True
+                                premium_extra = int(round(penalized * bonus_pct))
+                            else:
+                                premium_applied = False
+                                premium_extra = 0
+                            final_add = int(penalized + premium_extra)
+                            resp = db.add_premium_lifetime_progress(db_path, username, final_add)
+                            if not resp.get("success"):
+                                return {"success": False, "message": resp.get("message", "Failed to add progression")}
+                            return {
+                                "success": True,
+                                "message": "Session ended (stat reached 0, penalty applied)",
+                                "added_progress": int(final_add),
+                                "elapsed": int(elapsed_stop),
+                                "bonus": int(bonus_stop),
+                                "rate": rate_stop,
+                                "penalty_applied": True,
+                                "penalty_percent": 25,
+                                "penalty_loss": int(max(0, total_base - penalized)),
+                                "premium_applied": premium_applied,
+                                "premium_extra": int(premium_extra),
+                                "base_reward": int(total_base),
+                                "current_tier": int(resp.get("current_tier", 0)),
+                                "lifetime_seconds": int(resp.get("lifetime_seconds", 0)),
+                            }
+                    except Exception:
+                        pass
+                    next_deplete_at += 600
+            time.sleep(1)
+        except KeyboardInterrupt:
+            sys.stdout.write("\n")
+            ans = input("Claim now and end session? (y/N to resume): ").strip().lower()
+            if ans in ("y", "yes"):
+                break
+            else:
+                continue
+    elapsed = int(time.time()) - start_ts
+    blocks = elapsed // block_seconds
+    rate = float(base + per_block * max(0, blocks - 1))
+    bonus = int(round(elapsed * rate))
+    total_add_base = int(elapsed + bonus)
+    # Premium bonus
+    premium_applied = False
+    premium_extra = 0
+    prem = db.is_premium(db_path, username)
+    import time as _t
+    if bool(prem.get("active")):
+        tier = db.get_user_premium_tier(db_path, username)
+        bonus_pct = float(tier.get("earn_bonus_percent", 0.10))
+        premium_applied = True
+        premium_extra = int(round(total_add_base * bonus_pct))
+    total_add = int(total_add_base + premium_extra)
+    res = db.add_premium_lifetime_progress(db_path, username, total_add)
+    if not res.get("success"):
+        return {"success": False, "message": res.get("message", "Failed to add progression")}
+    return {"success": True, "message": "Open session claimed (progression)", "added_progress": int(total_add), "elapsed": elapsed, "bonus": bonus, "rate": rate, "premium_applied": premium_applied, "premium_extra": int(premium_extra), "base_reward": int(total_add_base), "current_tier": int(res.get("current_tier", 0)), "lifetime_seconds": int(res.get("lifetime_seconds", 0))}
+
+
 def _format_promo_line(db_path: Path) -> str:
     pc = db.get_earner_promo_config(db_path)
     return "Promo: ongoing" if int(pc.get("promo_enabled", 1)) else "Promo: disabled"
@@ -626,6 +892,7 @@ def interactive_menu(db_path: Path) -> None:
             print(f"{Fore.YELLOW}1){Style.RESET_ALL} Start earning session (stake and countdown)")
             print(f"{Fore.YELLOW}2){Style.RESET_ALL} Start open earning (no stake)  [{_format_bonus_brief(current_db)}]")
             print(f"{Fore.YELLOW}3){Style.RESET_ALL} View stake tiers")
+            print(f"{Fore.YELLOW}12){Style.RESET_ALL} Start open earning to Premium progression")
             # If admin, show promo config option
             if current_user.get("is_admin"):
                 print(f"{Fore.YELLOW}4){Style.RESET_ALL} Set promo config (admin)")
@@ -694,6 +961,12 @@ def interactive_menu(db_path: Path) -> None:
                     print(Fore.RED + res.get("message", "Failed"))
             elif choice == "3":
                 _print_stake_tiers(current_db)
+            elif choice == "12":
+                res = start_open_earn_session_to_progress(current_db, uname)
+                if res.get("success"):
+                    print(Fore.GREEN + f"Added {formatting.format_duration(int(res.get('added_progress',0)), style='short')} to Premium progression. Now Tier {int(res.get('current_tier',0))}.")
+                else:
+                    print(Fore.RED + res.get("message", "Failed"))
             elif choice == "4" and current_user.get("is_admin"):
                 # Admin-only: set promo config interactively
                 print(Fore.CYAN + "Set promo config (percentages as decimals, e.g., 0.10 for 10%)")

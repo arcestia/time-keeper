@@ -1479,6 +1479,45 @@ def premium_daily_restore(db_path: Path, username: str) -> Dict[str, Any]:
             except Exception: pass
             return {"success": False, "message": f"Daily restore failed: {e}"}
 
+# ---- Add to premium lifetime progression ----
+def add_premium_lifetime_progress(db_path: Path, username: str, seconds: int) -> Dict[str, Any]:
+    """Atomically add seconds to user's premium_lifetime_seconds and update tier/lifetime flags.
+    Returns: {success, message, lifetime_seconds, current_tier, is_lifetime}
+    """
+    incr = int(max(0, seconds))
+    if incr == 0:
+        return {"success": True, "message": "No change", "lifetime_seconds": None}
+    import time as _t
+    with connect(db_path) as conn:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            _ensure_premium(conn)
+            _ensure_premium_tiers(conn)
+            u = conn.execute("SELECT id, premium_lifetime_seconds, premium_is_lifetime FROM users WHERE username = ?", (username,)).fetchone()
+            if not u:
+                conn.rollback(); return {"success": False, "message": "User not found"}
+            uid = int(u[0]); cur = int(u[1] or 0)
+            new_secs = cur + incr
+            conn.execute("UPDATE users SET premium_lifetime_seconds = ? WHERE id = ?", (new_secs, uid))
+            # Determine new tier and lifetime flag
+            tier_rows = conn.execute("SELECT tier, min_seconds FROM premium_tiers ORDER BY tier ASC").fetchall()
+            current_tier = 0
+            tier10 = 0
+            for tr in tier_rows:
+                t = int(tr[0]); ms = int(tr[1])
+                if t == 10: tier10 = ms
+                if ms <= new_secs and t > current_tier:
+                    current_tier = t
+            if tier10 > 0 and new_secs >= tier10:
+                conn.execute("UPDATE users SET premium_is_lifetime = 1 WHERE id = ?", (uid,))
+            conn.commit()
+            is_life = int(conn.execute("SELECT premium_is_lifetime FROM users WHERE id = ?", (uid,)).fetchone()[0]) == 1
+            return {"success": True, "message": "Progress added", "lifetime_seconds": int(new_secs), "current_tier": int(current_tier), "is_lifetime": bool(is_life)}
+        except Exception as e:
+            try: conn.rollback()
+            except Exception: pass
+            return {"success": False, "message": f"Add progression failed: {e}"}
+
 
 def purchase_premium(db_path: Path, username: str, seconds: int) -> Dict[str, Any]:
     """Purchase premium at 1:3 pricing. Min 3h if not currently premium; allow any positive extension if active.
