@@ -741,7 +741,26 @@ def get_user_stats(db_path: Path, username: str) -> Optional[Dict[str, int]]:
 def set_user_stats_full(db_path: Path, username: str) -> bool:
     with connect(db_path) as conn:
         _ensure_stats(conn)
-        cur = conn.execute("UPDATE users SET energy = 100, hunger = 100, water = 100 WHERE username = ?", (username,))
+        _ensure_premium(conn)
+        _ensure_premium_tiers(conn)
+        # Resolve per-user cap: premium lifetime or active premium uses tier cap; otherwise 100
+        u = conn.execute(
+            "SELECT id, premium_until, premium_is_lifetime, premium_lifetime_seconds FROM users WHERE username = ?",
+            (username,)
+        ).fetchone()
+        if not u:
+            return False
+        import time as _t
+        now_ts = int(_t.time())
+        is_life = int(u[2] or 0) == 1
+        cap = 100
+        if is_life or int(u[1] or 0) > now_ts:
+            row = _get_premium_tier_row(conn, int(u[3] or 0))
+            cap = int(row[4]) if row and int(row[4] or 0) > 0 else 100
+        cur = conn.execute(
+            "UPDATE users SET energy = ?, hunger = ?, water = ? WHERE id = ?",
+            (cap, cap, cap, int(u[0]))
+        )
         conn.commit()
         return (cur.rowcount or 0) > 0
 
@@ -749,9 +768,29 @@ def set_user_stats_full(db_path: Path, username: str) -> bool:
 def set_all_users_stats_full(db_path: Path) -> int:
     with connect(db_path) as conn:
         _ensure_stats(conn)
-        cur = conn.execute("UPDATE users SET energy = 100, hunger = 100, water = 100")
+        _ensure_premium(conn)
+        _ensure_premium_tiers(conn)
+        import time as _t
+        now_ts = int(_t.time())
+        # Fetch needed fields to compute caps per user
+        rows = conn.execute(
+            "SELECT id, premium_until, premium_is_lifetime, premium_lifetime_seconds FROM users"
+        ).fetchall()
+        updated = 0
+        for r in rows:
+            uid = int(r[0])
+            is_life = int(r[2] or 0) == 1
+            cap = 100
+            if is_life or int(r[1] or 0) > now_ts:
+                row = _get_premium_tier_row(conn, int(r[3] or 0))
+                cap = int(row[4]) if row and int(row[4] or 0) > 0 else 100
+            cur = conn.execute(
+                "UPDATE users SET energy = ?, hunger = ?, water = ? WHERE id = ?",
+                (cap, cap, cap, uid)
+            )
+            updated += int(cur.rowcount or 0)
         conn.commit()
-        return int(cur.rowcount or 0)
+        return updated
 
 
 def apply_stat_changes(db_path: Path, username: str, delta_energy: int, delta_hunger: int, delta_water: int) -> Dict[str, Any]:

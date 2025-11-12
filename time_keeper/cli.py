@@ -54,8 +54,8 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
     p_admin.add_argument("--reserves-distribute", action="store_true", help="Distribute Time Reserves equally among active users")
     p_admin.add_argument("--reserves-distribute-amount", help="Optional amount to distribute equally; omit to use full reserves")
     # User stats operations
-    p_admin.add_argument("--set-stats-full", help="Set a user's energy/hunger/water to 100% (username)")
-    p_admin.add_argument("--set-stats-full-all", action="store_true", help="Set all users' energy/hunger/water to 100%")
+    p_admin.add_argument("--set-stats-full", help="Restore a user's energy/hunger/water to their max cap (username)")
+    p_admin.add_argument("--set-stats-full-all", action="store_true", help="Restore all users' energy/hunger/water to their max cap")
     p_admin.add_argument("--db", help="SQLite database file path")
 
     p_lead = sub.add_parser("leaderboard", help="Show top accounts by balance")
@@ -211,11 +211,11 @@ def cmd_admin(db_path: Path, username: str, do_list: bool, show_reserves: bool =
             raise SystemExit(res.get("message", "Distribution failed"))
     elif set_stats_full_all:
         n = db.set_all_users_stats_full(db_path)
-        print(Fore.GREEN + f"Set stats to 100% for {n} users")
+        print(Fore.GREEN + f"Restored stats to cap for {n} users")
     elif set_stats_full:
         ok = db.set_user_stats_full(db_path, set_stats_full)
         if ok:
-            print(Fore.GREEN + f"Set stats to 100% for {set_stats_full}")
+            print(Fore.GREEN + f"Restored stats to cap for {set_stats_full}")
         else:
             raise SystemExit("Failed to set stats (user not found)")
     elif show_stats:
@@ -518,8 +518,8 @@ def interactive_menu(db_path: Path) -> None:
                 print(f"{Fore.YELLOW}4){Style.RESET_ALL} Show Time Reserves")
                 print(f"{Fore.YELLOW}5){Style.RESET_ALL} Transfer from Reserves to user")
                 print(f"{Fore.YELLOW}6){Style.RESET_ALL} Distribute Reserves equally")
-                print(f"{Fore.YELLOW}7){Style.RESET_ALL} Set a user's stats to 100%")
-                print(f"{Fore.YELLOW}8){Style.RESET_ALL} Set ALL users' stats to 100%")
+                print(f"{Fore.YELLOW}7){Style.RESET_ALL} Restore a user's stats to cap")
+                print(f"{Fore.YELLOW}8){Style.RESET_ALL} Restore ALL users' stats to cap")
                 print(f"{Fore.YELLOW}9){Style.RESET_ALL} Show statistics")
                 print(f"{Fore.YELLOW}10){Style.RESET_ALL} Leaderboard")
                 print(f"{Fore.YELLOW}11){Style.RESET_ALL} Run worker (background)")
@@ -606,20 +606,20 @@ def interactive_menu(db_path: Path) -> None:
                 else:
                     print(Fore.RED + res.get("message", "Distribution failed."))
             elif (is_admin and choice == "7"):
-                # set one user's stats to 100
-                target = _input_with_default("Username to set stats to 100%", "")
+                # restore one user's stats to cap
+                target = _input_with_default("Username to restore stats to cap", "")
                 if not target:
                     print(Fore.RED + "Username required.")
                 else:
                     ok = db.set_user_stats_full(current_db, target)
                     if ok:
-                        print(Fore.GREEN + f"Stats set to 100% for {target}")
+                        print(Fore.GREEN + f"Stats restored to cap for {target}")
                     else:
                         print(Fore.RED + "Failed to set stats (user not found)")
             elif (is_admin and choice == "8"):
-                # set all users stats to 100
+                # restore all users stats to cap
                 n = db.set_all_users_stats_full(current_db)
-                print(Fore.GREEN + f"Stats set to 100% for {n} users")
+                print(Fore.GREEN + f"Stats restored to cap for {n} users")
             elif (is_admin and choice == "9"):
                 # admin statistics
                 try:
