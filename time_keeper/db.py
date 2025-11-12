@@ -325,6 +325,30 @@ def seed_timezones_defaults(conn: sqlite3.Connection) -> None:
         defaults,
     )
 
+def list_timezones(db_path: Path) -> List[Dict[str, Any]]:
+    with connect(db_path) as conn:
+        _ensure_timezones(conn)
+        seed_timezones_defaults(conn)
+        rows = conn.execute(
+            "SELECT zone, deposit_seconds, earn_multiplier, store_multiplier, label FROM time_authority_timezones ORDER BY zone ASC"
+        ).fetchall()
+        return [
+            {
+                "zone": int(r[0]),
+                "deposit_seconds": int(r[1]),
+                "earn_multiplier": float(r[2]),
+                "store_multiplier": float(r[3]),
+                "label": (str(r[4]) if r[4] is not None else None),
+            }
+            for r in rows
+        ]
+
+def set_timezones_defaults(db_path: Path) -> None:
+    with connect(db_path) as conn:
+        _ensure_timezones(conn)
+        seed_timezones_defaults(conn)
+        conn.commit()
+
 def get_user_timezone_info(db_path: Path, username: str) -> Dict[str, Any]:
     with connect(db_path) as conn:
         _ensure_users_timezone(conn)
