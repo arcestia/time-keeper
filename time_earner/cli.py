@@ -921,6 +921,16 @@ def interactive_menu(db_path: Path) -> None:
                     print(Fore.CYAN + Style.BRIGHT + f"Premium {romans.get(tier_num)}: inactive")
                 else:
                     print(Fore.CYAN + Style.BRIGHT + "Premium: inactive")
+            # Timezone brief
+            try:
+                tzinfo = db.get_user_timezone_info(current_db, uname)
+                if tzinfo.get("success"):
+                    tz = int(tzinfo.get("zone", 12))
+                    tz_earn = float(tzinfo.get("earn_multiplier", 1.0))
+                    tz_store = float(tzinfo.get("store_multiplier", 1.0))
+                    print(Fore.CYAN + Style.BRIGHT + f"Timezone: TZ-{tz} (earn x{tz_earn:g}; store x{tz_store:g})")
+            except Exception:
+                pass
             # Show promo status line immediately under header
             print(_format_promo_line(current_db))
             print(f"{Fore.YELLOW}1){Style.RESET_ALL} Start earning session (stake and countdown)")

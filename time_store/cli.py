@@ -363,6 +363,16 @@ def interactive_menu(db_path: Path) -> None:
                     print(Fore.CYAN + Style.BRIGHT + f"Premium {romans.get(tier_num)}: inactive")
                 else:
                     print(Fore.CYAN + Style.BRIGHT + "Premium: inactive")
+            # Timezone brief
+            try:
+                tzinfo = tkdb.get_user_timezone_info(db_path, uname)
+                if tzinfo.get("success"):
+                    tz = int(tzinfo.get("zone", 12))
+                    earn = float(tzinfo.get("earn_multiplier", 1.0))
+                    store_mul = float(tzinfo.get("store_multiplier", 1.0))
+                    print(Fore.CYAN + Style.BRIGHT + f"Timezone: TZ-{tz} (earn x{earn:g}; store x{store_mul:g})")
+            except Exception:
+                pass
             if is_admin:
                 print(f"{Fore.YELLOW}1){Style.RESET_ALL} List items")
                 print(f"{Fore.YELLOW}2){Style.RESET_ALL} Show prices")

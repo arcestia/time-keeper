@@ -16,6 +16,13 @@ This repository is a pure experiment and vibe coding sandbox. A more complete ve
   - Store discount (personalized prices)
   - Stat cap increases (affects restores and daily premium restore)
 
+## Time Authority (timezones)
+- 12 zones: TZ-12 (lowest) → TZ-1 (richest). Moving up burns a deposit of time, increasing non-linearly.
+- Benefits vs cons:
+  - Earning multiplier increases with wealth (up to x3 at TZ-1).
+  - Store prices get more expensive with wealth (up to x10 at TZ-1).
+- Your current timezone and multipliers are shown in app headers. Use the Time Authority menu to view/move.
+
 ## Experiment vibe
 This is a vibe coding experiment—iterative, exploratory, and fun. Expect rapid evolution and occasional sharp edges.
 

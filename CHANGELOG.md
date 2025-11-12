@@ -17,6 +17,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
  - Integration: Applied timezone multipliers
    - Time Earner rewards now multiplied by timezone earn multiplier (all paths, including penalties and progression).
    - Time Store prices now multiplied by timezone store multiplier after Premium discount.
+ - CLI/UI: Time Authority
+   - New module `time_authority` with user commands (view, move-up, move-down) and admin (zones-list, zones-defaults).
+   - Movement of timezone is restricted to the Time Authority CLI. The Time Keeper submenu only allows View (user) and List/Reset (admin); no move actions are exposed there.
+   - Headers now show timezone brief: Time Keeper, Time Earner, and Time Store display `Timezone: TZ-n (earn xY; store xZ)`.
  - Docs: Simplified README to focus on project overview, components, premium tiers, experiment note, and contributing; removed setup/requirements/install/how-to sections.
  - Docs: Updated README intro to state it's a Python CLI game inspired by the film "In Time" and note a more complete Laravel version exists (link added: https://github.com/arcestia/time-keeper-laravel).
  - Added interactive menu mode (default when no subcommand is provided).
