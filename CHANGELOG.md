@@ -10,6 +10,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Added CLI with commands: `init-db`, `create-account`, `login`, `admin`, `leaderboard`, `run-worker`.
 - Implemented background worker to deduct time every second and deactivate accounts at zero.
 - Added README with setup and usage.
+ - Docs: Simplified README to focus on project overview, components, premium tiers, experiment note, and contributing; removed setup/requirements/install/how-to sections.
+ - Docs: Updated README intro to state it's a Python CLI game inspired by the film "In Time" and note a more complete Laravel version exists (link added: https://github.com/arcestia/time-keeper-laravel).
  - Added interactive menu mode (default when no subcommand is provided).
  - Interactive menu is session-aware: options change after login; admin options appear only for admin users.
  - Interactive UI: removed DB path from header; added colorized output via colorama.
