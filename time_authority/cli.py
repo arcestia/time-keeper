@@ -11,7 +11,7 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="time-authority", description="Manage timezones and crossings")
     p.add_argument("--db", default="timekeeper.db", help="SQLite database file path")
 
-    sub = p.add_subparsers(dest="cmd", required=True)
+    sub = p.add_subparsers(dest="cmd", required=False)
 
     # User commands
     sub.add_parser("view", help="View your current timezone and next deposit requirement")
@@ -25,6 +25,7 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
     a_sub.add_parser("zones-list", help="List all timezones and settings")
     a_sub.add_parser("zones-defaults", help="Seed/reset default timezones")
 
+    sub.add_parser("interactive", help="Run interactive menu")
     return p.parse_args(argv)
 
 
@@ -83,9 +84,97 @@ def cmd_move_down(db_path: Path, username: str) -> None:
         print(Fore.RED + res.get("message", "Move down failed"))
 
 
+def _print_table(headers, rows) -> None:
+    widths = [len(str(h)) for h in headers]
+    for row in rows:
+        for i, cell in enumerate(row):
+            widths[i] = max(widths[i], len(str(cell)))
+    header_line = "  ".join((Fore.CYAN + Style.BRIGHT + str(h).ljust(widths[i]) + Style.RESET_ALL) for i, h in enumerate(headers))
+    sep_line = "  ".join("-" * w for w in widths)
+    print(header_line)
+    print(sep_line)
+    for row in rows:
+        print("  ".join(str(cell).ljust(widths[i]) for i, cell in enumerate(row)))
+
+def interactive_menu(db_path: Path) -> None:
+    current_user: Optional[dict] = None
+    while True:
+        print("")
+        print(Fore.CYAN + Style.BRIGHT + "=== Time Authority ===")
+        if current_user is None:
+            print("Status: not logged in")
+            print("1) Login")
+            print("0) Quit")
+            choice = input("Choose: ").strip()
+            if choice == "0":
+                print(Fore.GREEN + "Goodbye.")
+                return
+            elif choice == "1":
+                username = input("Username: ").strip()
+                u = db.find_user(db_path, username)
+                if not u:
+                    print(Fore.RED + "User not found")
+                    continue
+                pw = prompt_passcode()
+                if not auth.verify_passcode(pw, u["passcode_hash"]):
+                    print(Fore.RED + "Authentication failed")
+                    continue
+                current_user = dict(u)
+                role = "admin" if current_user.get("is_admin") else "user"
+                print(Fore.GREEN + f"Login success. User: {current_user['username']} ({role})")
+            else:
+                print(Fore.RED + "Invalid choice")
+        else:
+            uname = current_user.get("username")
+            is_admin = bool(current_user.get("is_admin"))
+            print(Fore.CYAN + Style.BRIGHT + f"Logged in as: {uname} ({'admin' if is_admin else 'user'})")
+            print("1) View my timezone")
+            print("2) Move up (burn deposit)")
+            print("3) Move down (no refund)")
+            if is_admin:
+                print("4) Admin: zones-list")
+                print("5) Admin: zones-defaults")
+            print("6) Logout")
+            print("0) Quit")
+            choice = input("Choose: ").strip()
+            if choice == "0":
+                print(Fore.GREEN + "Goodbye.")
+                return
+            elif choice == "6":
+                current_user = None
+                print(Fore.YELLOW + "Logged out.")
+            elif choice == "1":
+                cmd_view(db_path, uname)
+            elif choice == "2":
+                cmd_move_up(db_path, uname)
+            elif choice == "3":
+                cmd_move_down(db_path, uname)
+            elif is_admin and choice == "4":
+                zones = db.list_timezones(db_path)
+                from time_keeper import formatting
+                headers = ["Zone", "Deposit", "Earn", "Store"]
+                rows = []
+                for z in zones:
+                    dep = formatting.format_duration(int(z["deposit_seconds"]), style="short") if int(z["zone"]) != 12 else "-"
+                    rows.append([
+                        str(int(z["zone"])),
+                        dep,
+                        f"x{float(z['earn_multiplier']):g}",
+                        f"x{float(z['store_multiplier']):g}",
+                    ])
+                _print_table(headers, rows)
+            elif is_admin and choice == "5":
+                db.set_timezones_defaults(db_path)
+                print(Fore.GREEN + "Seeded default timezones.")
+            else:
+                print(Fore.RED + "Invalid choice")
+
 def main(argv: Optional[list] = None) -> None:
     args = parse_args(argv)
     db_path = Path(args.db)
+    if args.cmd is None or args.cmd == "interactive":
+        interactive_menu(db_path)
+        return
     if args.cmd in ("view", "move-up", "move-down"):
         # Determine user by asking
         import getpass
@@ -106,13 +195,19 @@ def main(argv: Optional[list] = None) -> None:
     if args.cmd == "admin":
         require_admin(Path(args.db), args.username)
         if args.admin_cmd == "zones-list":
-            rows = db.list_timezones(db_path)
+            zones = db.list_timezones(db_path)
             from time_keeper import formatting
-            print(Fore.CYAN + Style.BRIGHT + "== Timezones ==")
-            print("Zone  Deposit           Earn   Store")
-            for r in rows:
-                dep = formatting.format_duration(int(r["deposit_seconds"]), style="short") if int(r["zone"]) != 12 else "-"
-                print(f"{int(r['zone']):>4}  {dep:<16}  x{float(r['earn_multiplier']):<4g}  x{float(r['store_multiplier']):<4g}")
+            headers = ["Zone", "Deposit", "Earn", "Store"]
+            rows = []
+            for z in zones:
+                dep = formatting.format_duration(int(z["deposit_seconds"]), style="short") if int(z["zone"]) != 12 else "-"
+                rows.append([
+                    str(int(z["zone"])),
+                    dep,
+                    f"x{float(z['earn_multiplier']):g}",
+                    f"x{float(z['store_multiplier']):g}",
+                ])
+            _print_table(headers, rows)
         elif args.admin_cmd == "zones-defaults":
             db.set_timezones_defaults(db_path)
             print(Fore.GREEN + "Seeded default timezones.")
