@@ -260,7 +260,7 @@ def start_earn_session(db_path: Path, username: str, stake_seconds: int) -> dict
         bal = db.get_balance_seconds(db_path, username) or 0
         return {"success": False, "message": "Forfeited", "balance": int(bal)}
 
-    # Reward by multiplier (+10% if premium active at claim time)
+    # Reward by multiplier (+10% if premium active at claim time), then apply timezone earn multiplier
     base_reward = int(round(stake * reward_mult))
     premium_applied = False
     premium_extra = 0
@@ -271,7 +271,13 @@ def start_earn_session(db_path: Path, username: str, stake_seconds: int) -> dict
         bonus_pct = float(tier.get("earn_bonus_percent", 0.10))
         premium_applied = True
         premium_extra = int(round(base_reward * bonus_pct))
-    reward = int(base_reward + premium_extra)
+    # Timezone earn multiplier
+    try:
+        tz = db.get_timezone_multipliers(db_path, username)
+        earn_mul = float(tz.get("earn_multiplier", 1.0))
+    except Exception:
+        earn_mul = 1.0
+    reward = int(round((base_reward + premium_extra) * earn_mul))
     with db.connect(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         conn.execute("UPDATE users SET balance_seconds = balance_seconds + ? WHERE username = ?", (reward, username))
@@ -345,7 +351,13 @@ def start_earn_session_to_progress(db_path: Path, username: str, stake_seconds: 
         bonus_pct = float(tier.get("earn_bonus_percent", 0.10))
         premium_applied = True
         premium_extra = int(round(base_reward * bonus_pct))
-    reward = int(base_reward + premium_extra)
+    # Apply timezone earn multiplier
+    try:
+        tz = db.get_timezone_multipliers(db_path, username)
+        earn_mul = float(tz.get("earn_multiplier", 1.0))
+    except Exception:
+        earn_mul = 1.0
+    reward = int(round((base_reward + premium_extra) * earn_mul))
     # Apply to premium progression
     res = db.add_premium_lifetime_progress(db_path, username, reward)
     if not res.get("success"):
@@ -427,7 +439,12 @@ def start_open_earn_session(db_path: Path, username: str) -> dict:
                     else:
                         premium_applied = False
                         premium_extra = 0
-                    final_add = int(penalized + premium_extra)
+                    try:
+                        tz = db.get_timezone_multipliers(db_path, username)
+                        earn_mul = float(tz.get("earn_multiplier", 1.0))
+                    except Exception:
+                        earn_mul = 1.0
+                    final_add = int(round((penalized + premium_extra) * earn_mul))
                     with db.connect(db_path) as conn2:
                         conn2.execute("BEGIN IMMEDIATE")
                         conn2.execute("UPDATE users SET balance_seconds = balance_seconds + ? WHERE username = ?", (final_add, username))
@@ -507,7 +524,13 @@ def start_open_earn_session(db_path: Path, username: str) -> dict:
                             else:
                                 premium_applied = False
                                 premium_extra = 0
-                            final_add = int(penalized + premium_extra)
+                            # Apply timezone earn multiplier to penalized progression
+                            try:
+                                tz = db.get_timezone_multipliers(db_path, username)
+                                earn_mul = float(tz.get("earn_multiplier", 1.0))
+                            except Exception:
+                                earn_mul = 1.0
+                            final_add = int(round((penalized + premium_extra) * earn_mul))
                             with db.connect(db_path) as conn2:
                                 conn2.execute("BEGIN IMMEDIATE")
                                 conn2.execute("UPDATE users SET balance_seconds = balance_seconds + ? WHERE username = ?", (final_add, username))
@@ -564,7 +587,12 @@ def start_open_earn_session(db_path: Path, username: str) -> dict:
         bonus_pct = float(tier.get("earn_bonus_percent", 0.10))
         premium_applied = True
         premium_extra = int(round(total_add_base * bonus_pct))
-    total_add = int(total_add_base + premium_extra)
+    try:
+        tz = db.get_timezone_multipliers(db_path, username)
+        earn_mul = float(tz.get("earn_multiplier", 1.0))
+    except Exception:
+        earn_mul = 1.0
+    total_add = int(round((total_add_base + premium_extra) * earn_mul))
     with db.connect(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         conn.execute("UPDATE users SET balance_seconds = balance_seconds + ? WHERE username = ?", (total_add, username))
@@ -760,7 +788,13 @@ def start_open_earn_session_to_progress(db_path: Path, username: str) -> dict:
         bonus_pct = float(tier.get("earn_bonus_percent", 0.10))
         premium_applied = True
         premium_extra = int(round(total_add_base * bonus_pct))
-    total_add = int(total_add_base + premium_extra)
+    # Apply timezone earn multiplier
+    try:
+        tz = db.get_timezone_multipliers(db_path, username)
+        earn_mul = float(tz.get("earn_multiplier", 1.0))
+    except Exception:
+        earn_mul = 1.0
+    total_add = int(round((total_add_base + premium_extra) * earn_mul))
     res = db.add_premium_lifetime_progress(db_path, username, total_add)
     if not res.get("success"):
         return {"success": False, "message": res.get("message", "Failed to add progression")}

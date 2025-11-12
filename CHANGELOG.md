@@ -10,6 +10,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Added CLI with commands: `init-db`, `create-account`, `login`, `admin`, `leaderboard`, `run-worker`.
 - Implemented background worker to deduct time every second and deactivate accounts at zero.
 - Added README with setup and usage.
+ - Feature: Introduced Time Authority (timezones) foundation.
+   - Schema: users.timezone (default 12); table time_authority_timezones with deposit_seconds, earn_multiplier, store_multiplier, label.
+   - Defaults: Seeded TZ-12..TZ-1 with non-linear costs (TZ-2->TZ-1 = 20y), earn up to x3.0, store up to x10.0.
+   - DB helpers: get_user_timezone_info, get_timezone_multipliers, move_up_timezone (burn deposit), move_down_timezone (no refund).
+ - Integration: Applied timezone multipliers
+   - Time Earner rewards now multiplied by timezone earn multiplier (all paths, including penalties and progression).
+   - Time Store prices now multiplied by timezone store multiplier after Premium discount.
  - Docs: Simplified README to focus on project overview, components, premium tiers, experiment note, and contributing; removed setup/requirements/install/how-to sections.
  - Docs: Updated README intro to state it's a Python CLI game inspired by the film "In Time" and note a more complete Laravel version exists (link added: https://github.com/arcestia/time-keeper-laravel).
  - Added interactive menu mode (default when no subcommand is provided).

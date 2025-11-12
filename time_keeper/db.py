@@ -273,6 +273,150 @@ def get_earner_promo_config(db_path: Path) -> Dict[str, float | int]:
                 }
         except Exception:
             pass
+
+# ---- Time Authority (Timezones) ----
+def _ensure_users_timezone(conn: sqlite3.Connection) -> None:
+    try:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+        if "timezone" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN timezone INTEGER NOT NULL DEFAULT 12")
+    except Exception:
+        pass
+
+def _ensure_timezones(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS time_authority_timezones (
+            zone INTEGER PRIMARY KEY,
+            deposit_seconds INTEGER NOT NULL,
+            earn_multiplier REAL NOT NULL,
+            store_multiplier REAL NOT NULL,
+            label TEXT
+        )
+        """
+    )
+
+def seed_timezones_defaults(conn: sqlite3.Connection) -> None:
+    D = 86400
+    MO = 30 * D
+    Y = 365 * D
+    defaults = [
+        # zone, deposit, earn_mul, store_mul, label
+        (1,  20*Y, 3.00, 10.00, "Zone 1"),   # deposit shown for entry from 2->1
+        (2,  15*Y, 2.70, 7.50,  "Zone 2"),
+        (3,  10*Y, 2.40, 5.50,  "Zone 3"),
+        (4,   6*Y, 2.10, 4.20,  "Zone 4"),
+        (5,   3*Y, 1.80, 3.30,  "Zone 5"),
+        (6,  18*MO,1.60, 2.70,  "Zone 6"),
+        (7,  12*MO,1.45, 2.20,  "Zone 7"),
+        (8,   8*MO,1.30, 1.80,  "Zone 8"),
+        (9,   4*MO,1.20, 1.50,  "Zone 9"),
+        (10,  2*MO,1.10, 1.30,  "Zone 10"),
+        (11,  1*MO,1.05, 1.15,  "Zone 11"),
+        (12,  0,    1.00, 1.00,  "Zone 12"),
+    ]
+    _ensure_timezones(conn)
+    rows = conn.execute("SELECT COUNT(*) FROM time_authority_timezones").fetchone()
+    if rows and int(rows[0] or 0) == 12:
+        return
+    conn.execute("DELETE FROM time_authority_timezones")
+    conn.executemany(
+        "INSERT INTO time_authority_timezones(zone, deposit_seconds, earn_multiplier, store_multiplier, label) VALUES (?,?,?,?,?)",
+        defaults,
+    )
+
+def get_user_timezone_info(db_path: Path, username: str) -> Dict[str, Any]:
+    with connect(db_path) as conn:
+        _ensure_users_timezone(conn)
+        _ensure_timezones(conn)
+        # Seed if empty
+        seed_timezones_defaults(conn)
+        u = conn.execute("SELECT id, timezone FROM users WHERE username = ?", (username,)).fetchone()
+        if not u:
+            return {"success": False, "message": "User not found"}
+        z = int(u[1] or 12)
+        tz = conn.execute("SELECT zone, deposit_seconds, earn_multiplier, store_multiplier, label FROM time_authority_timezones WHERE zone = ?", (z,)).fetchone()
+        next_dep = None
+        if z > 1:
+            # Cost to move up is the deposit at current zone (entering next higher wealth)
+            cur = conn.execute("SELECT deposit_seconds FROM time_authority_timezones WHERE zone = ?", (z-1,)).fetchone()
+            next_dep = int(cur[0]) if cur else None
+        return {
+            "success": True,
+            "zone": z,
+            "earn_multiplier": float(tz[2]) if tz else 1.0,
+            "store_multiplier": float(tz[3]) if tz else 1.0,
+            "next_deposit_seconds": next_dep,
+        }
+
+def get_timezone_multipliers(db_path: Path, username: str) -> Dict[str, float]:
+    info = get_user_timezone_info(db_path, username)
+    if not info.get("success"):
+        return {"earn_multiplier": 1.0, "store_multiplier": 1.0}
+    return {"earn_multiplier": float(info.get("earn_multiplier", 1.0)), "store_multiplier": float(info.get("store_multiplier", 1.0))}
+
+def move_up_timezone(db_path: Path, username: str) -> Dict[str, Any]:
+    result: Dict[str, Any] = {"success": False, "message": ""}
+    with connect(db_path) as conn:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            _ensure_users_timezone(conn)
+            _ensure_timezones(conn)
+            seed_timezones_defaults(conn)
+            u = conn.execute("SELECT id, active, balance_seconds, timezone FROM users WHERE username = ?", (username,)).fetchone()
+            if not u:
+                result["message"] = "User not found"; conn.rollback(); return result
+            if not int(u[1]):
+                result["message"] = "Account is deactivated"; conn.rollback(); return result
+            zone = int(u[3] or 12)
+            if zone <= 1:
+                result["message"] = "Already at highest timezone"; conn.rollback(); return result
+            dep_row = conn.execute("SELECT deposit_seconds FROM time_authority_timezones WHERE zone = ?", (zone-1,)).fetchone()
+            deposit = int(dep_row[0]) if dep_row else None
+            if deposit is None or deposit <= 0:
+                # allow free move if defined as 0
+                deposit = 0
+            bal = int(u[2] or 0)
+            if bal < deposit:
+                result["message"] = "Insufficient balance for deposit"; conn.rollback(); return result
+            # Burn deposit and move up
+            if deposit > 0:
+                conn.execute("UPDATE users SET balance_seconds = balance_seconds - ? WHERE id = ?", (deposit, int(u[0])))
+            conn.execute("UPDATE users SET timezone = ? WHERE id = ?", (zone-1, int(u[0])))
+            post = conn.execute("SELECT balance_seconds, timezone FROM users WHERE id = ?", (int(u[0]),)).fetchone()
+            conn.commit()
+            result.update({"success": True, "message": "Moved up timezone", "balance": int(post[0]), "zone": int(post[1]), "deposit": int(deposit)})
+            return result
+        except Exception as e:
+            try: conn.rollback()
+            except Exception: pass
+            result["message"] = f"Move up failed: {e}"
+            return result
+
+def move_down_timezone(db_path: Path, username: str) -> Dict[str, Any]:
+    result: Dict[str, Any] = {"success": False, "message": ""}
+    with connect(db_path) as conn:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            _ensure_users_timezone(conn)
+            u = conn.execute("SELECT id, active, timezone FROM users WHERE username = ?", (username,)).fetchone()
+            if not u:
+                result["message"] = "User not found"; conn.rollback(); return result
+            if not int(u[1]):
+                result["message"] = "Account is deactivated"; conn.rollback(); return result
+            zone = int(u[2] or 12)
+            if zone >= 12:
+                result["message"] = "Already at lowest timezone"; conn.rollback(); return result
+            conn.execute("UPDATE users SET timezone = ? WHERE id = ?", (zone+1, int(u[0])))
+            post = conn.execute("SELECT timezone FROM users WHERE id = ?", (int(u[0]),)).fetchone()
+            conn.commit()
+            result.update({"success": True, "message": "Moved down timezone", "zone": int(post[0])})
+            return result
+        except Exception as e:
+            try: conn.rollback()
+            except Exception: pass
+            result["message"] = f"Move down failed: {e}"
+            return result
     # Fallback to legacy combined table
     return get_earner_promo_config.__wrapped__(db_path)  # type: ignore
 
@@ -1201,6 +1345,23 @@ def purchase_store_item(db_path: Path, username: str, item: str, quantity: int, 
                 except Exception:
                     disc = 0.10
                 effective = max(1, int(round(effective * (1.0 - disc))))
+            # Timezone store multiplier (cons at richer zones): apply after premium discount
+            try:
+                tz = get_user_timezone_info.__globals__  # type: ignore
+            except Exception:
+                tz = None
+            try:
+                # Call helper to get multipliers
+                from . import db as _db_mod  # type: ignore
+            except Exception:
+                _db_mod = None  # type: ignore
+            try:
+                # reuse helpers in this module directly
+                tzm = get_timezone_multipliers(Path(str(db_path)) if isinstance(db_path, Path) else db_path, username)  # type: ignore
+                store_mul = float(tzm.get("store_multiplier", 1.0))
+            except Exception:
+                store_mul = 1.0
+            effective = max(1, int(round(effective * store_mul)))
             total_cost = effective * q
             bal = int(u["balance_seconds"])
             if bal < total_cost:
