@@ -24,6 +24,9 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
     a_sub = a.add_subparsers(dest="admin_cmd", required=True)
     a_sub.add_parser("zones-list", help="List all timezones and settings")
     a_sub.add_parser("zones-defaults", help="Seed/reset default timezones")
+    p_set = a_sub.add_parser("set-user-zone", help="Set a user's timezone (admin)")
+    p_set.add_argument("--target", required=True, help="Target username")
+    p_set.add_argument("--zone", required=True, type=int, help="Timezone (1..12)")
 
     sub.add_parser("interactive", help="Run interactive menu")
     return p.parse_args(argv)
@@ -134,6 +137,7 @@ def interactive_menu(db_path: Path) -> None:
             if is_admin:
                 print("4) Admin: zones-list")
                 print("5) Admin: zones-defaults")
+                print("7) Admin: set user zone")
             print("6) Logout")
             print("0) Quit")
             choice = input("Choose: ").strip()
@@ -166,6 +170,18 @@ def interactive_menu(db_path: Path) -> None:
             elif is_admin and choice == "5":
                 db.set_timezones_defaults(db_path)
                 print(Fore.GREEN + "Seeded default timezones.")
+            elif is_admin and choice == "7":
+                target = input("Target username: ").strip()
+                try:
+                    zone = int(input("Zone (1..12): ").strip())
+                except ValueError:
+                    print(Fore.RED + "Invalid zone")
+                    continue
+                res = db.set_user_timezone(db_path, target, zone)
+                if res.get("success"):
+                    print(Fore.GREEN + f"Updated {target}: TZ-{int(res.get('previous_zone',0))} -> TZ-{int(res.get('zone',0))}")
+                else:
+                    print(Fore.RED + res.get("message", "Failed to set timezone"))
             else:
                 print(Fore.RED + "Invalid choice")
 
@@ -211,6 +227,12 @@ def main(argv: Optional[list] = None) -> None:
         elif args.admin_cmd == "zones-defaults":
             db.set_timezones_defaults(db_path)
             print(Fore.GREEN + "Seeded default timezones.")
+        elif args.admin_cmd == "set-user-zone":
+            res = db.set_user_timezone(db_path, args.target, int(args.zone))
+            if res.get("success"):
+                print(Fore.GREEN + f"Updated {args.target}: TZ-{int(res.get('previous_zone',0))} -> TZ-{int(res.get('zone',0))}")
+            else:
+                print(Fore.RED + res.get("message", "Failed to set timezone"))
         return
 
 

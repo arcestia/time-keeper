@@ -445,6 +445,34 @@ def move_down_timezone(db_path: Path, username: str) -> Dict[str, Any]:
     return get_earner_promo_config.__wrapped__(db_path)  # type: ignore
 
 
+def set_user_timezone(db_path: Path, target_username: str, zone: int) -> Dict[str, Any]:
+    result: Dict[str, Any] = {"success": False, "message": ""}
+    z = int(zone)
+    if z < 1:
+        z = 1
+    if z > 12:
+        z = 12
+    with connect(db_path) as conn:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            _ensure_users_timezone(conn)
+            _ensure_timezones(conn)
+            seed_timezones_defaults(conn)
+            u = conn.execute("SELECT id, timezone FROM users WHERE username = ?", (target_username,)).fetchone()
+            if not u:
+                result["message"] = "User not found"; conn.rollback(); return result
+            prev = int(u[1] or 12)
+            conn.execute("UPDATE users SET timezone = ? WHERE id = ?", (z, int(u[0])))
+            conn.commit()
+            result.update({"success": True, "message": "Timezone updated", "previous_zone": prev, "zone": z})
+            return result
+        except Exception as e:
+            try: conn.rollback()
+            except Exception: pass
+            result["message"] = f"Set timezone failed: {e}"
+            return result
+
+
 # ---- Time Earner stake config ----
 def _ensure_earner_stake_config(conn: sqlite3.Connection) -> None:
     conn.execute(
